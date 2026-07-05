@@ -19,9 +19,25 @@ from .yield_curve import ns_loadings
 MATURITIES = np.array([0.25, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 30])
 
 
+def parse_maturity(label) -> float:
+    """Maturity label -> years. Accepts 0.25 / '0.25' / '3M' / '3 mo' / '10Y'."""
+    s = str(label).strip().upper().replace(" ", "")
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    for suffix, scale in (("MO", 1 / 12), ("M", 1 / 12), ("YR", 1.0),
+                          ("Y", 1.0), ("W", 1 / 52), ("D", 1 / 365)):
+        if s.endswith(suffix):
+            return float(s[: -len(suffix)]) * scale
+    raise ValueError(f"Cannot parse maturity label: {label!r}")
+
+
 def load_yield_csv(path: str) -> pd.DataFrame:
+    """First column date; remaining columns maturity labels; yields in %.
+    Maturity headers may be numeric years or strings like '3M'/'10Y'."""
     df = pd.read_csv(path, index_col=0, parse_dates=True)
-    df.columns = df.columns.astype(float)
+    df.columns = [parse_maturity(c) for c in df.columns]
     return df.sort_index()
 
 

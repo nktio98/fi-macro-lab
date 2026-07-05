@@ -53,5 +53,5 @@ class Dashboard:
                 f"<header><h1>{self.title}</h1><p>{self.subtitle}</p></header>"
                 + "".join(self.sections)
                 + f"<footer>{footer}</footer></body></html>")
-        Path(path).write_text(html)
+        Path(path).write_text(html, encoding="utf-8")
         return path

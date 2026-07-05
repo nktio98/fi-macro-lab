@@ -38,14 +38,19 @@ def black_litterman(Sigma: np.ndarray, w_mkt: np.ndarray, P: np.ndarray,
                     Q: np.ndarray, tau: float = 0.05,
                     omega: np.ndarray | None = None,
                     risk_aversion: float = 2.5):
-    """Returns (posterior mean, posterior covariance of the mean)."""
+    """Returns (posterior mean, posterior PREDICTIVE covariance Sigma + A).
+
+    A = cov of the mean estimate; the covariance of returns themselves is
+    Sigma + A, which is what a mean-variance optimizer must consume --
+    feeding it A alone badly understates risk.
+    """
     Pi = implied_returns(w_mkt, Sigma, risk_aversion)
     tS = tau * Sigma
     if omega is None:                       # He-Litterman default
         omega = np.diag(np.diag(P @ tS @ P.T))
     A = np.linalg.inv(np.linalg.inv(tS) + P.T @ np.linalg.inv(omega) @ P)
     mu = A @ (np.linalg.inv(tS) @ Pi + P.T @ np.linalg.inv(omega) @ Q)
-    return mu, A
+    return mu, Sigma + A
 
 
 # ------------------------------------------------------- Entropy pooling

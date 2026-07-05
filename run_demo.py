@@ -101,6 +101,9 @@ print("Duration gap analysis (EUR mn):")
 for k, v in gap.items():
     print(f"  {k:>22}: {v}")
 
+print("\nKey-rate surplus sensitivity (per-tenor gap, asset-MV base):")
+print(stress.krd_gap(pf, liab, curve_fn).to_string())
+
 scenarios = {
     "+100bp parallel":      {"rates": {k: 100 for k in pf.krd}},
     "Bear steepener":       {"rates": {2: 20, 5: 50, 10: 90, 20: 110, 30: 120}},

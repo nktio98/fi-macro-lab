@@ -33,10 +33,11 @@ class GaussianMS:
         y = np.asarray(y, float)
         T, k = len(y), self.k
         # init: split by quantile of |y - median| so state 0 = calm, 1 = stressed
-        q = pd.qcut(pd.Series(y).rank(method="first"), k, labels=False).to_numpy()
+        dev = np.abs(y - np.median(y))
+        q = pd.qcut(pd.Series(dev).rank(method="first"), k, labels=False).to_numpy()
         mu = np.array([y[q == i].mean() for i in range(k)])
         sig = np.array([max(y[q == i].std(), 1e-4) for i in range(k)])
-        P = np.full((k, k), 0.05 / (k - 1)) + np.eye(k) * (0.95 - 0.05 / (k - 1) * 0)
+        P = np.full((k, k), 0.05 / (k - 1)) + np.eye(k) * (0.95 - 0.05 / (k - 1))
         P = P / P.sum(1, keepdims=True)
         pi = np.full(k, 1 / k)
         ll_old = -np.inf

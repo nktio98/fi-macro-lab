@@ -98,7 +98,13 @@ def probabilistic_sharpe(returns: pd.Series, sr_benchmark: float = 0.0) -> float
 
 def deflated_sharpe(returns: pd.Series, n_trials: int,
                     trial_sr_var: float | None = None) -> float:
-    """DSR: PSR against the expected max Sharpe from n_trials tries."""
+    """DSR: PSR against the expected max Sharpe from n_trials tries.
+
+    trial_sr_var should be the CROSS-TRIAL variance of the tried strategies'
+    Sharpe estimates (Bailey & Lopez de Prado 2014). The default 1/T is the
+    sampling variance of a single SR estimate under the null -- a floor, so
+    the default DSR is conservative-optimistic; pass the true cross-trial
+    variance when the whole grid's Sharpes are available."""
     r = returns.dropna()
     sr_var = trial_sr_var if trial_sr_var is not None else (1.0 / len(r))
     em = 0.5772156649
@@ -109,17 +115,47 @@ def deflated_sharpe(returns: pd.Series, n_trials: int,
 
 
 def cv_sharpes(position_fn, params_grid: list[dict], signal_inputs,
-               asset_ret: pd.Series, cv: PurgedKFold) -> pd.DataFrame:
-    """Evaluate a param grid with purged CV. position_fn(inputs, **params)
-    must return a position series aligned to asset_ret."""
-    rows = []
+               asset_ret: pd.Series, cv: PurgedKFold
+               ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Purged CV with train-based selection.
+
+    For each fold, every candidate parameter set is scored on the TRAINING
+    indices only; the train-best candidate is then evaluated once on the
+    held-out TEST fold. position_fn(inputs, **params) must return a causal
+    (backward-looking) position series aligned to asset_ret.
+
+    Returns (table, selection):
+      table     -- per-candidate train/test Sharpe summary across folds.
+      selection -- per fold: the train-selected params and their out-of-
+                   sample (test) Sharpe. selection["oos_sharpe"].mean() is
+                   the OOS estimate of the *selection procedure* -- the
+                   number to trust, since it never sees its own test data.
+
+    Train indices can be non-contiguous (blocks before and after the test
+    fold); the single misaligned observation at the seam is negligible at
+    daily frequency.
+    """
     n = len(asset_ret)
-    for params in params_grid:
-        pos = position_fn(signal_inputs, **params)
-        fold_srs = []
-        for train, test in cv.split(n):
-            net = backtest(pos.iloc[test], asset_ret.iloc[test])["net"]
-            fold_srs.append(sharpe(net))
-        rows.append({**params, "cv_sharpe_mean": np.mean(fold_srs),
-                     "cv_sharpe_std": np.std(fold_srs)})
-    return pd.DataFrame(rows).round(3)
+    positions = [position_fn(signal_inputs, **p) for p in params_grid]
+    folds = list(cv.split(n))
+    train_sr = np.zeros((len(folds), len(params_grid)))
+    test_sr = np.zeros((len(folds), len(params_grid)))
+    for f, (train, test) in enumerate(folds):
+        for j, pos in enumerate(positions):
+            train_sr[f, j] = sharpe(
+                backtest(pos.iloc[train], asset_ret.iloc[train])["net"])
+            test_sr[f, j] = sharpe(
+                backtest(pos.iloc[test], asset_ret.iloc[test])["net"])
+    table = pd.DataFrame(
+        [{**params_grid[j],
+          "train_sharpe_mean": train_sr[:, j].mean(),
+          "test_sharpe_mean": test_sr[:, j].mean(),
+          "test_sharpe_std": test_sr[:, j].std()}
+         for j in range(len(params_grid))]).round(3)
+    picks = train_sr.argmax(axis=1)
+    selection = pd.DataFrame(
+        [{**params_grid[j],
+          "train_sharpe": train_sr[f, j], "oos_sharpe": test_sr[f, j]}
+         for f, j in enumerate(picks)],
+        index=pd.RangeIndex(len(folds), name="fold")).round(3)
+    return table, selection

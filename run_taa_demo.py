@@ -34,9 +34,15 @@ def make_position(inputs, lookback, skip):
 grid = [{"lookback": lb, "skip": sk}
         for lb in (63, 126, 252) for sk in (5, 21)]
 cv = taa.PurgedKFold(n_splits=5, label_horizon=21, embargo_pct=0.02)
-res = taa.cv_sharpes(make_position, grid, {"prices": prices}, asset_ret, cv)
-res = res.sort_values("cv_sharpe_mean", ascending=False)
+res, selection = taa.cv_sharpes(make_position, grid, {"prices": prices},
+                                asset_ret, cv)
+res = res.sort_values("test_sharpe_mean", ascending=False)
 print(res.to_string(index=False))
+print("\nTrain-selected config per fold and its OUT-OF-SAMPLE Sharpe:")
+print(selection.to_string())
+print(f"\nOOS Sharpe of the selection procedure: "
+      f"{selection['oos_sharpe'].mean():.2f} "
+      "(this is the honest number - selection never sees its test fold)")
 
 section("2. DEFLATED SHARPE - correcting for the number of trials")
 best = res.iloc[0]
@@ -44,7 +50,12 @@ pos = make_position({"prices": prices}, int(best["lookback"]), int(best["skip"])
 net = taa.backtest(pos, asset_ret)["net"]
 sr = taa.sharpe(net)
 psr = taa.probabilistic_sharpe(net)
-dsr = taa.deflated_sharpe(net, n_trials=len(grid))
+# cross-trial variance of the grid's full-sample Sharpes (per-period units)
+grid_srs = np.array([taa.sharpe(taa.backtest(
+    make_position({"prices": prices}, g["lookback"], g["skip"]),
+    asset_ret)["net"]) for g in grid]) / np.sqrt(taa.ANN)
+dsr = taa.deflated_sharpe(net, n_trials=len(grid),
+                          trial_sr_var=float(grid_srs.var()))
 print(f"Best config: lookback={int(best['lookback'])}, skip={int(best['skip'])}")
 print(f"Full-sample net Sharpe : {sr:.2f}")
 print(f"Probabilistic Sharpe   : {psr:.1%}  (P(true SR > 0), one strategy)")

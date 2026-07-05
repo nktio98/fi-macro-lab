@@ -78,6 +78,47 @@ def duration_gap(p: Portfolio, liab: LiabilityBook, curve_fn,
             "surplus_chg_+100bp": round(d_assets - d_liabs, 1)}
 
 
+def liability_krd(liab: LiabilityBook, curve_fn, tenors,
+                  bump_bp: float = 1.0) -> dict:
+    """Liability key-rate durations via triangular bumps at each tenor.
+
+    Bump weights are 1 at the tenor, decay linearly to 0 at the adjacent
+    tenors, and extend flat below the first / beyond the last tenor, so the
+    per-tenor bumps sum to a parallel shift and the KRDs sum to the total
+    duration. Returns tenor -> KRD (years, on liability PV)."""
+    t = np.arange(1, len(liab.cashflows) + 1, dtype=float)
+    y = curve_fn(t)
+    pv0 = float((liab.cashflows * np.exp(-y * t)).sum())
+    ks = sorted(tenors)
+    out = {}
+    for i, k in enumerate(ks):
+        lo = ks[i - 1] if i else None
+        hi = ks[i + 1] if i < len(ks) - 1 else None
+        left = np.ones_like(t) if lo is None else np.clip((t - lo) / (k - lo), 0, 1)
+        right = np.ones_like(t) if hi is None else np.clip((hi - t) / (hi - k), 0, 1)
+        w = np.where(t <= k, left, right)
+        yb = y + w * bump_bp / 1e4
+        pvb = float((liab.cashflows * np.exp(-yb * t)).sum())
+        out[k] = (pv0 - pvb) / pv0 / (bump_bp / 1e4)
+    return out
+
+
+def krd_gap(p: Portfolio, liab: LiabilityBook, curve_fn) -> pd.DataFrame:
+    """Per-tenor surplus sensitivity: asset KRD vs liability KRD (both in
+    years of surplus impact per 100bp at that tenor, on asset MV base)."""
+    t = np.arange(1, len(liab.cashflows) + 1, dtype=float)
+    y = curve_fn(t)
+    pv_l = float((liab.cashflows * np.exp(-y * t)).sum())
+    lk = liability_krd(liab, curve_fn, list(p.krd))
+    rows = {}
+    for k in sorted(p.krd):
+        a, l = p.krd[k], lk[k] * pv_l / p.mv       # both on asset-MV base
+        rows[k] = {"asset_krd": round(a, 2), "liab_krd_scaled": round(l, 2),
+                   "gap": round(a - l, 2),
+                   "surplus_chg_+100bp": round(-(a - l) * 0.01 * p.mv, 1)}
+    return pd.DataFrame(rows).T.rename_axis("tenor")
+
+
 # Illustrative Solvency-II-flavored standalone charges (fractions of exposure)
 DEFAULT_CHARGES = {"equity": 0.39, "spread_per_dur_yr": 0.012, "fx": 0.25}
 DEFAULT_CORR = pd.DataFrame(

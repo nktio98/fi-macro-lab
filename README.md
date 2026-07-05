@@ -2,7 +2,34 @@
 
 Quant toolkit mirroring the core processes of an insurance investment
 strategist role (Allianz Investment Management style): yield curve
-modeling, regime detection, and ALM-aware stress testing.
+modeling, regime detection, ALM-aware stress testing, FX analytics,
+TAA validation, manager oversight, and view-conditioned allocation —
+running on **live FRED data** with an interactive **Streamlit app**.
+
+## Quick start
+
+```bash
+python -m venv .venv && .venv\Scripts\activate     # Windows
+pip install -r requirements.txt
+
+pytest                        # validate estimators vs statsmodels (23 tests)
+python run_real_demo.py       # live-data demo (FRED, no API key needed)
+streamlit run app.py          # interactive dashboard on live data
+```
+
+Optional: set `FRED_API_KEY` (free at fred.stlouisfed.org) for
+full-history credit spreads and equity; without it the public endpoint
+caps BAML OAS at ~3y and SP500 at ~10y (Treasuries and FX are always
+full-history). Live data is cached in `data_cache/` for 24h.
+
+## Tests
+
+`tests/test_validation.py` proves the from-scratch econometrics against
+statsmodels references: ADF t-stat, Newey-West HAC standard errors,
+Benjamini-Hochberg FDR, and VAR(1) coefficients all match to 1e-8.
+`tests/test_internals.py` covers invariants and recovery on synthetic
+data (regime accuracy, no-lookahead backtests, purged-CV leakage,
+KRD additivity, entropy-pooling view attainment, BL limits).
 
 ## Modules
 
@@ -79,8 +106,17 @@ python3 run_demo.py       # console report + charts in outputs/
 - Single shareable .html embedding every chart and table; no server.
 - Build everything end-to-end: `python3 build_dashboard.py`
 
+### 9. `data_live.py` — Live data (FRED)
+- US Treasury curve, Asian FX, US IG/HY OAS, S&P 500 + VIX; no API key
+  required, optional `FRED_API_KEY` for full history; 24h disk cache.
+- `python3 run_real_demo.py` — DNS + regimes + ALM stress on live data.
+
+### 10. `app.py` — Streamlit dashboard (live data)
+- All modules interactive in the browser: `streamlit run app.py`.
+- Deployable free on Streamlit Community Cloud (push repo to GitHub,
+  point share.streamlit.io at `app.py`).
+
 ## Roadmap (extensions)
-- Real data feeds (FRED/MAS/Bloomberg CSV drop-in via data.load_yield_csv).
-- AFNS/ACM term premium; DCC-GARCH hedge ratios; BVAR scenario generator
-  feeding entropy pooling; Streamlit/Power BI front end; LLM-drafted
-  daily commentary layer.
+- MAS/SGS local-market data feeds; AFNS/ACM term premium; DCC-GARCH
+  hedge ratios; BVAR scenario generator feeding entropy pooling;
+  LLM-drafted daily commentary layer.
