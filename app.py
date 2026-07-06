@@ -1,12 +1,22 @@
 """
-AIM Strategist Dashboard -- Streamlit app over the aim_toolkit library.
+AIM Strategist Dashboard -- Asia-focused, multi-economy.
+
+Designed around three responsibilities of a regional investment strategist:
+  1. Economic & capital-market analysis (rates, FX, macro drivers,
+     regime shifts)          -> tabs "Rates & curves", "FX & regimes"
+  2. Translate macro views into actionable TAA proposals
+                             -> tab  "Strategy & TAA"
+  3. Forward-looking scenario analysis & stress testing (rates, spreads,
+     FX, geopolitical)       -> tab  "Stress & resilience"
+plus asset-manager oversight -> tab  "Manager oversight".
+
+Data: AsianBondsOnline (ASEAN+3 LCY curves incl. Indonesia & Singapore),
+Japan MoF (full JGB history), ECB (euro AAA curve, IDR/INR/TWD FX),
+FRED (US curve, OECD 10y panel, Asian FX, spreads, S&P 500). All free,
+no API key; cached 24h on disk + 6h in-app. Offline fallback: simulators.
 
 Run locally :  streamlit run app.py
 Deploy free :  push to GitHub -> share.streamlit.io -> pick repo/app.py
-
-Live data comes from FRED (no key needed; set FRED_API_KEY in Streamlit
-secrets for full-history spreads/equity). If FRED is unreachable the app
-falls back to the offline simulators and says so.
 """
 import numpy as np
 import pandas as pd
@@ -16,20 +26,73 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 from aim_toolkit import allocation as al
-from aim_toolkit import data, data_live, fx, managers, stress, taa
+from aim_toolkit import data, data_global, data_live, fx, managers, stress, taa
 from aim_toolkit.regimes import GaussianMS, JumpModel, regime_summary
 from aim_toolkit.yield_curve import DNSModel, ns_loadings
 
-st.set_page_config(page_title="AIM Strategist Dashboard", layout="wide")
+st.set_page_config(page_title="AIM Strategist Dashboard — Asia",
+                   layout="wide")
+
+ASIA_NAMES = data_global.ABO_ECONOMIES
 
 
 # ------------------------------------------------------------- data layer
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching US Treasury curve (FRED)...")
-def get_yields():
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching US Treasury curve...")
+def get_us_curve():
     try:
         return data_live.us_treasury_curve(start="2005-01-01"), True
     except Exception:
         return data.simulate_yields(), False
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching JGB curve (MoF)...")
+def get_jgb_curve():
+    try:
+        return data_global.jgb_curve(start="2005-01-01"), True
+    except Exception:
+        return None, False
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching euro AAA curve (ECB)...")
+def get_ecb_curve():
+    try:
+        return data_global.ecb_curve(), True
+    except Exception:
+        return None, False
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching Asian curves (ADB)...")
+def get_asia_curves():
+    try:
+        out = data_global.abo_curves()
+        return ({k: v for k, v in out.items()},
+                {k: v.attrs.get("as_of", "") for k, v in out.items()})
+    except Exception:
+        return {}, {}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching global 10y panel...")
+def get_10y_panel():
+    try:
+        return data_global.global_10y_panel(start="2005-01-01")
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching FX (FRED + ECB)...")
+def get_fx_all():
+    frames = []
+    try:
+        frames.append(data_live.fx_rates(start="2005-01-01"))
+    except Exception:
+        pass
+    try:
+        frames.append(data_global.ecb_fx_usd(("IDR", "INR", "TWD")))
+    except Exception:
+        pass
+    if not frames:
+        return None
+    return pd.concat(frames, axis=1).sort_index().ffill()
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner="Fetching market data (FRED)...")
@@ -41,7 +104,7 @@ def get_market():
         return m.assign(vix=np.nan), False
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching S&P 500 (FRED)...")
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching S&P 500...")
 def get_equity():
     try:
         return data_live.equity_and_vix(start="2015-01-01"), True
@@ -51,14 +114,6 @@ def get_equity():
         return pd.DataFrame({"SP500": px, "VIX": 20.0}), False
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching FX (FRED)...")
-def get_fx():
-    try:
-        return data_live.fx_rates(start="2000-01-01"), True
-    except Exception:
-        return None, False
-
-
 @st.cache_data(show_spinner="Fitting DNS model...")
 def fit_dns(yields: pd.DataFrame):
     return DNSModel().fit(yields)
@@ -66,222 +121,286 @@ def fit_dns(yields: pd.DataFrame):
 
 def live_badge(is_live: bool, src: str):
     if is_live:
-        st.caption(f":green[● LIVE] {src} via FRED, cached ≤6h")
+        st.caption(f":green[● LIVE] {src}")
     else:
-        st.caption(f":orange[● OFFLINE] simulated {src} (FRED unreachable)")
+        st.caption(f":orange[● OFFLINE] simulated stand-in for {src}")
+
+
+def snap_yield(snap: pd.DataFrame, tenor: float) -> float:
+    """Interpolated yield at a tenor from an ABO snapshot."""
+    return float(np.interp(tenor, snap.index.to_numpy(float),
+                           snap["yield_pct"].to_numpy(float)))
 
 
 # ------------------------------------------------------------------ header
-st.title("AIM Strategist Dashboard")
-st.caption("Yield curves · regimes · ALM stress · FX · TAA · manager "
-           "oversight · allocation — insurance investment-strategist toolkit")
+st.title("AIM Strategist Dashboard — Asia")
+st.caption("Multi-economy rates · FX · regimes · TAA · ALM stress · manager "
+           "oversight — built for regional insurance portfolio strategy")
 
-TAB_NAMES = ["Yield curve", "Regimes", "ALM stress", "FX", "TAA",
-             "Managers", "Allocation"]
-tabs = st.tabs(TAB_NAMES)
+tabs = st.tabs(["🌏 Rates & curves", "💱 FX & regimes", "🎯 Strategy & TAA",
+                "🛡️ Stress & resilience", "🔍 Manager oversight"])
 
-yields, yl_live = get_yields()
-dns = fit_dns(yields)
+us_yields, us_live = get_us_curve()
+dns_us = fit_dns(us_yields)
 
 
-# ------------------------------------------------------------- yield curve
+# =========================================================== rates & curves
 with tabs[0]:
-    live_badge(yl_live, "US Treasury constant-maturity yields")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Optimal λ", f"{dns.lam:.3f}")
-    c2.metric("In-sample RMSE", f"{dns.rmse_bp:.1f} bp")
-    c3.metric("10y yield (latest)", f"{yields.iloc[-1].get(10.0, np.nan):.2f} %")
+    st.caption("*Objective: economic & capital-market analysis — interest "
+               "rates: trends, curve shapes, and cross-market comparison.*")
 
+    asia, as_ofs = get_asia_curves()
+    st.subheader("Asian LCY government curves (AsianBondsOnline, ADB)")
+    if asia:
+        default = [c for c in ("ID", "SG", "KR", "CN", "TH", "MY", "JP", "US")
+                   if c in asia]
+        sel = st.multiselect("Economies", list(asia),
+                             default=default,
+                             format_func=lambda c: ASIA_NAMES.get(c, c))
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for c in sel:
+                s = asia[c]
+                ax.plot(s.index, s["yield_pct"], "o-", ms=3.5,
+                        label=ASIA_NAMES.get(c, c))
+            ax.set_xlabel("maturity (yrs)"); ax.set_ylabel("yield (%)")
+            any_asof = next((v for v in as_ofs.values() if v), "")
+            ax.set_title(f"LCY government yield curves — close {any_asof}")
+            ax.legend(ncol=2, fontsize=8); ax.grid(alpha=0.3)
+            st.pyplot(fig, clear_figure=True)
+        with col2:
+            rows = {}
+            for c in sel:
+                s = asia[c]
+                y10, y2 = snap_yield(s, 10), snap_yield(s, 2)
+                ytd = s["ytd_bp"].iloc[
+                    int(np.abs(s.index.to_numpy(float) - 10).argmin())]
+                rows[ASIA_NAMES.get(c, c)] = {
+                    "10y %": round(y10, 2), "2s10s bp": round((y10 - y2) * 100, 0),
+                    "10y YTD bp": round(ytd, 0)}
+            st.dataframe(pd.DataFrame(rows).T
+                         .sort_values("10y %", ascending=False))
+            st.caption("2s10s from interpolated snapshot tenors. "
+                       "Steep + high-yield (ID) vs flat + low-yield (JP, CN) "
+                       "is the regional carry map at a glance.")
+    else:
+        st.warning("AsianBondsOnline unreachable — Asian curve snapshot "
+                   "unavailable this session.")
+
+    st.divider()
+    st.subheader("Curve dynamics lab — DNS factors & VAR forecast")
+    jgb, jgb_live = get_jgb_curve()
+    ecb, ecb_live = get_ecb_curve()
+    panels = {"United States (UST)": (us_yields if us_live else None),
+              "Japan (JGB)": jgb, "Euro area (AAA)": ecb}
+    avail = {k: v for k, v in panels.items() if v is not None}
+    if not avail:
+        avail = {"United States (simulated)": us_yields}
+    pick = st.selectbox("Market (deep-history panels)", list(avail))
+    ylds = avail[pick]
+    model = fit_dns(ylds)
     h = st.slider("Forecast horizon (months)", 1, 24, 12)
-    fc = dns.forecast_curve(h)
-    mats = yields.columns.to_numpy(float)
-
+    fc = model.forecast_curve(h)
+    mats = ylds.columns.to_numpy(float)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Optimal λ", f"{model.lam:.3f}")
+    c2.metric("In-sample RMSE", f"{model.rmse_bp:.1f} bp")
+    c3.metric("10y (latest)", f"{np.interp(10, mats, ylds.iloc[-1]):.2f} %")
     col1, col2 = st.columns(2)
     with col1:
-        st.line_chart(dns.factors, height=320)
-        st.caption("DNS level / slope / curvature factors")
+        st.line_chart(model.factors, height=300)
+        st.caption("Level / slope / curvature — level ≈ long-run rate view, "
+                   "slope ≈ policy stance, curvature ≈ belly positioning")
     with col2:
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(mats, yields.iloc[-1], "o-", label=f"current ({yields.index[-1]:%Y-%m})")
-        ax.plot(mats, fc.iloc[min(2, h - 1)], "s--", label=f"+{min(3, h)}m forecast")
-        ax.plot(mats, fc.iloc[-1], "^--", label=f"+{h}m forecast")
-        ax.set_xlabel("maturity (yrs)"); ax.set_ylabel("%"); ax.legend()
-        ax.set_title("VAR(1) curve forecast")
+        ax.plot(mats, ylds.iloc[-1], "o-",
+                label=f"current ({ylds.index[-1]:%Y-%m})")
+        ax.plot(mats, fc.iloc[min(2, h - 1)], "s--", label=f"+{min(3, h)}m")
+        ax.plot(mats, fc.iloc[-1], "^--", label=f"+{h}m")
+        ax.set_xlabel("maturity (yrs)"); ax.set_ylabel("%")
+        ax.set_title("VAR(1) factor-forecast curve"); ax.legend()
+        ax.grid(alpha=0.3)
         st.pyplot(fig, clear_figure=True)
-    st.caption("Long-run VAR factor means: "
-               + np.array2string(dns.var.long_run_mean(), precision=2))
+
+    st.divider()
+    st.subheader("Global 10y government yields — history")
+    g10 = get_10y_panel()
+    if g10 is not None:
+        cols = st.multiselect("Markets", list(g10.columns),
+                              default=list(g10.columns))
+        st.line_chart(g10[cols], height=320)
+        st.caption("Monthly OECD long-term yields via FRED. Divergence "
+                   "US/EU vs JP/KR is the hedged-yield-pickup driver on "
+                   "the Strategy tab.")
 
 
-# ----------------------------------------------------------------- regimes
+# ============================================================ fx & regimes
 with tabs[1]:
+    st.caption("*Objective: economic & capital-market analysis — FX and "
+               "macro drivers: trends, regime shifts, valuation signals.*")
+
+    fxr = get_fx_all()
+    eq, eq_live = get_equity()
+    st.subheader("Asian FX monitor (vs USD)")
+    if fxr is not None:
+        ccys = st.multiselect("Currencies", list(fxr.columns),
+                              default=[c for c in ("SGD", "JPY", "KRW", "IDR",
+                                                   "THB", "MYR", "CNY")
+                                       if c in fxr.columns])
+        lookback = st.radio("Window", ["1y", "3y", "10y"], index=1,
+                            horizontal=True)
+        n = {"1y": 252, "3y": 756, "10y": 2520}[lookback]
+        sub = fxr[ccys].dropna(how="all").iloc[-n:]
+        norm = sub / sub.iloc[0] * 100
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            st.line_chart(norm, height=320)
+            st.caption("Indexed to 100 at window start; UP = local currency "
+                       "DEPRECIATING vs USD (rates are local per USD).")
+        with col2:
+            last = fxr[ccys].dropna(how="all")
+            ytd_start = last.loc[last.index >= f"{last.index[-1].year}-01-01"]
+            tbl = pd.DataFrame({
+                "spot": last.iloc[-1].round(2),
+                "YTD %": ((last.iloc[-1] / ytd_start.iloc[0] - 1) * 100).round(2),
+            })
+            st.dataframe(tbl)
+            st.caption("Positive YTD % = depreciation vs USD, i.e. an "
+                       "unhedged USD asset gained in local terms.")
+
+    st.divider()
+    st.subheader("Regime detection")
     mkt, mkt_live = get_market()
-    live_badge(mkt_live, "S&P 500 returns + US IG OAS")
-    pen = st.slider("Jump penalty (higher = more persistent regimes)",
-                    5.0, 300.0, 80.0, 5.0)
-    ret = mkt["equity_ret"]
-    feat = np.column_stack([
-        ret.rolling(10).std().bfill(),
-        ret.rolling(10).mean().bfill(),
-        mkt["credit_spread_bp"].diff().rolling(10).mean().bfill(),
-    ])
+    assets = {"S&P 500 (global risk)": None}
+    if fxr is not None:
+        for c in fxr.columns:
+            assets[f"USD/{c}"] = c
+    pick = st.selectbox("Series", list(assets))
+    pen = st.slider("Jump penalty (persistence)", 5.0, 300.0, 80.0, 5.0)
+    if assets[pick] is None:
+        ret = mkt["equity_ret"]
+        feat = np.column_stack([
+            ret.rolling(10).std().bfill(),
+            ret.rolling(10).mean().bfill(),
+            mkt["credit_spread_bp"].diff().rolling(10).mean().bfill()])
+    else:
+        ret = fxr[assets[pick]].pct_change().dropna().iloc[-2520:]
+        feat = np.column_stack([ret.rolling(10).std().bfill(),
+                                ret.rolling(10).mean().bfill()])
     jm = JumpModel(jump_penalty=pen).fit(feat)
     ms = GaussianMS().fit(ret.to_numpy())
     ms_states = (ms.smoothed[:, 1] > 0.5).astype(int)
-
     fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
     cum = (1 + ret).cumprod()
     for a, s_, name in [(axes[0], jm.states, f"Jump model (penalty {pen:.0f})"),
                         (axes[1], ms_states, "2-state Markov-switching")]:
-        a.plot(mkt.index, cum, "k", lw=0.8)
-        a.fill_between(mkt.index, cum.min(), cum.max(), where=s_ == 1,
+        a.plot(ret.index, cum, "k", lw=0.8)
+        a.fill_between(ret.index, cum.min(), cum.max(), where=s_ == 1,
                        alpha=0.25, color="red")
-        a.set_title(f"{name} — shaded = stress regime")
+        a.set_title(f"{name} — shaded = stress/volatile regime")
     st.pyplot(fig, clear_figure=True)
-
     col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Per-regime stats (jump model)**")
-        st.dataframe(regime_summary(jm.states, ret))
-    with col2:
-        st.write("**Model comparison**")
-        st.dataframe(pd.DataFrame({
-            "switches": [(np.diff(jm.states) != 0).sum(),
-                         (np.diff(ms_states) != 0).sum()],
-            "stress freq %": [round(jm.states.mean() * 100, 1),
-                              round(ms_states.mean() * 100, 1)],
-        }, index=["Jump model", "MS-HMM"]))
-        st.caption("MS-HMM expected regime duration (days): "
-                   + np.array2string(ms.expected_duration, precision=0))
+    col1.dataframe(regime_summary(jm.states, ret))
+    col2.dataframe(pd.DataFrame({
+        "switches": [(np.diff(jm.states) != 0).sum(),
+                     (np.diff(ms_states) != 0).sum()],
+        "stress freq %": [round(jm.states.mean() * 100, 1),
+                          round(ms_states.mean() * 100, 1)]},
+        index=["Jump model", "MS-HMM"]))
 
-
-# -------------------------------------------------------------- ALM stress
-with tabs[2]:
-    live_badge(yl_live, "discounting on the fitted live curve")
-    st.write("**Portfolio** (edit and everything below recomputes)")
-    c = st.columns(5)
-    mv = c[0].number_input("Assets MV (mn)", 1000.0, 1e6, 10_000.0, step=500.0)
-    credit_w = c[1].number_input("Credit weight", 0.0, 1.0, 0.45, 0.05)
-    spread_dur = c[2].number_input("Spread duration", 0.0, 15.0, 5.5, 0.5)
-    eq_w = c[3].number_input("Equity weight", 0.0, 1.0, 0.08, 0.01)
-    fx_w = c[4].number_input("Unhedged FX weight", 0.0, 1.0, 0.05, 0.01)
-
-    krd_df = st.data_editor(pd.DataFrame(
-        {"tenor": [2, 5, 10, 20, 30], "krd": [0.4, 1.2, 3.0, 2.4, 1.0]}),
-        hide_index=True, width=350)
-    pf = stress.Portfolio(mv=mv,
-                          krd=dict(zip(krd_df["tenor"], krd_df["krd"])),
-                          spread_dur=spread_dur, credit_weight=credit_w,
-                          equity_weight=eq_w, fx_unhedged_weight=fx_w)
-
-    lc = st.columns(3)
-    cf1 = lc[0].number_input("Liab CF yrs 1-10 (mn/yr)", 0.0, 1e5, 380.0)
-    cf2 = lc[1].number_input("Liab CF yrs 11-30 (mn/yr)", 0.0, 1e5, 300.0)
-    cf3 = lc[2].number_input("Liab CF yrs 31-40 (mn/yr)", 0.0, 1e5, 150.0)
-    liab = stress.LiabilityBook(cashflows=np.concatenate(
-        [np.full(10, cf1), np.full(20, cf2), np.full(10, cf3)]))
-    curve_fn = lambda t: ns_loadings(t, dns.lam) \
-        @ dns.factors.iloc[-1].to_numpy() / 100
-
-    gap = stress.duration_gap(pf, liab, curve_fn,
-                              asset_dur=sum(pf.krd.values()))
-    m = st.columns(4)
-    m[0].metric("Liability PV (mn)", f"{gap['liab_pv']:,.0f}")
-    m[1].metric("Duration gap (yrs)", f"{gap['dur_gap']:.2f}")
-    m[2].metric("Economic surplus (mn)", f"{gap['surplus']:,.0f}")
-    m[3].metric("Surplus Δ +100bp (mn)", f"{gap['surplus_chg_+100bp']:,.0f}")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Key-rate surplus sensitivity**")
-        st.dataframe(stress.krd_gap(pf, liab, curve_fn))
-    with col2:
-        st.write("**Capital proxy** (illustrative, NOT regulatory)")
-        st.dataframe(pd.Series(stress.capital_proxy(pf), name="value"))
-
-    scenarios = {
-        "+100bp parallel": {"rates": {k: 100 for k in pf.krd}},
-        "Bear steepener": {"rates": {2: 20, 5: 50, 10: 90, 20: 110, 30: 120}},
-        "Taper tantrum '13": {"rates": {k: 80 for k in pf.krd},
-                              "spreads_bp": 60, "equity_pct": -6, "fx_pct": -8},
-        "Credit blowout (GFC)": {"spreads_bp": 250, "equity_pct": -35,
-                                 "rates": {k: -60 for k in pf.krd}},
-        "Asia FX crisis": {"fx_pct": -20, "spreads_bp": 120, "equity_pct": -15,
-                           "rates": {2: 150, 5: 120, 10: 90, 20: 70, 30: 60}},
-    }
-    res = stress.run_scenarios(pf, scenarios)
-    fig, ax = plt.subplots(figsize=(10, 4))
-    res[["rates", "spreads", "equity", "fx"]].plot(
-        kind="bar", stacked=True, ax=ax,
-        color=["#4477AA", "#EE6677", "#228833", "#CCBB44"])
-    ax.plot(range(len(res)), res["total"], "kD", label="total")
-    ax.axhline(0, color="k", lw=0.7); ax.legend()
-    ax.set_ylabel("P&L (mn)"); plt.xticks(rotation=12)
-    ax.set_title("Scenario P&L decomposition")
-    st.pyplot(fig, clear_figure=True)
-    st.dataframe(res)
-
-
-# ------------------------------------------------------------------- FX
-with tabs[3]:
-    fxr, fx_live = get_fx()
-    live_badge(fx_live, "Asian FX vs USD")
-    st.write("**Hedged yield pickup** — hedged USD credit vs local bonds "
-             "(edit the assumptions)")
-    mk = st.data_editor(pd.DataFrame({
-        "market": ["SGD", "JPY", "KRW", "TWD"],
-        "usd_asset_yield": [5.3, 5.3, 5.3, 5.3],
-        "r_usd": [4.3, 4.3, 4.3, 4.3],
-        "r_local": [3.6, 0.3, 3.0, 1.6],
-        "local_asset_yield": [3.1, 1.0, 3.6, 1.7],
-        "basis_bp": [-45, -60, -35, -80],
-    }), hide_index=True)
-    table = fx.pickup_table(
-        {r["market"]: {k: r[k] for k in
-                       ("usd_asset_yield", "r_usd", "r_local",
-                        "local_asset_yield", "basis_bp")}
-         for _, r in mk.iterrows()})
-    st.dataframe(table)
-    st.caption("pickup > 0: hedged USD credit beats local bonds for that "
-               "investor. Negative x-ccy basis makes USD hedging costlier.")
-
+    st.divider()
+    st.subheader("FX fair value — Engle-Granger ECM (BEER-lite)")
     if fxr is not None:
-        eq, _ = get_equity()
-        ccy = st.selectbox("Investor currency", list(fxr.columns), index=0)
+        ccy = st.selectbox("Currency", [c for c in fxr.columns], index=0,
+                           key="ecm_ccy")
         spot = fxr[ccy].dropna()
-
-        st.write(f"**Fair value (Engle-Granger ECM)** — log USD/{ccy} vs "
-                 "US 10y yield (BEER-lite, illustrative)")
-        us10 = yields[10.0].dropna() if 10.0 in yields.columns else None
+        m_spot = np.log(spot.resample("ME").last()).dropna()
+        us10 = us_yields[10.0].resample("ME").last() \
+            if 10.0 in us_yields.columns else None
+        jgb_c, _ = get_jgb_curve()
+        fund = pd.DataFrame(index=m_spot.index)
         if us10 is not None:
-            m_spot = np.log(spot.resample("ME").last()).dropna()
-            fund = pd.DataFrame({"us10y": us10}).reindex(m_spot.index).dropna()
-            m_spot = m_spot.loc[fund.index]
-            ecm = fx.ECMFairValue().fit(m_spot, fund)
+            if ccy == "JPY" and jgb_c is not None and 10.0 in jgb_c.columns:
+                diff = (us10 - jgb_c[10.0].resample("ME").last())
+                fund["rate_diff_10y"] = diff.reindex(m_spot.index)
+            else:
+                fund["us10y"] = us10.reindex(m_spot.index)
+        fund = fund.dropna()
+        if len(fund) > 48:
+            m_spot2 = m_spot.loc[fund.index]
+            ecm = fx.ECMFairValue().fit(m_spot2, fund)
             fv = ecm.fair_value(fund)
             fig, ax = plt.subplots(figsize=(10, 3.5))
-            ax.plot(m_spot.index, m_spot, label=f"log USD/{ccy}")
+            ax.plot(m_spot2.index, m_spot2, label=f"log USD/{ccy}")
             ax.plot(fv.index, fv, "--", label="ECM fair value")
             sd = ecm.resid.std()
             ax.fill_between(fv.index, fv - 2 * sd, fv + 2 * sd, alpha=0.15)
-            ax.legend(); ax.set_title(ecm.summary().replace("\n", " | "))
+            ax.legend(); ax.grid(alpha=0.3)
+            ax.set_title(ecm.summary().replace("\n", "  |  "), fontsize=9)
             st.pyplot(fig, clear_figure=True)
-
-        st.write("**Rolling minimum-variance hedge ratio** — S&P 500 held "
-                 f"by a {ccy} investor")
-        fx_ret = spot.pct_change()                     # local per USD
-        eq_usd = eq["SP500"].pct_change().reindex(spot.index).dropna()
-        idx = eq_usd.index.intersection(fx_ret.index)
-        unhedged = (1 + eq_usd.loc[idx]) * (1 + fx_ret.loc[idx]) - 1
-        h = fx.min_var_hedge_ratio(unhedged, fx_ret.loc[idx], window=126)
-        st.line_chart(h.dropna().clip(-0.5, 2), height=260)
-        st.caption("h* = Cov(unhedged return, FX return)/Var(FX). "
-                   "1 = full hedge of the USD exposure.")
+            st.caption("Fundamental: US-Japan 10y differential for JPY, US "
+                       "10y otherwise — illustrative BEER; a production "
+                       "model adds ToT, CA balance, relative CPI. Outside "
+                       "the ±2σ band = valuation signal; half-life = how "
+                       "fast misvaluation historically decays.")
 
 
-# ------------------------------------------------------------------- TAA
-with tabs[4]:
+# ========================================================== strategy & TAA
+with tabs[2]:
+    st.caption("*Objective: translate macro views, market developments and "
+               "valuation signals into actionable TAA — consistent with "
+               "objectives and constraints.*")
+
+    st.subheader("Cross-market hedged yield pickup (live curves)")
+    asia, _ = get_asia_curves()
+    mkt_, _ = get_market()
+    if asia and 1.0 in us_yields.columns:
+        r_usd = float(us_yields[1.0].iloc[-1])
+        us10 = float(np.interp(10, us_yields.columns.to_numpy(float),
+                               us_yields.iloc[-1]))
+        try:
+            oas_bp = float(mkt_["credit_spread_bp"].iloc[-1])
+        except Exception:
+            oas_bp = 90.0
+        usd_asset = us10 + oas_bp / 100
+        basis_defaults = {"SG": -45, "ID": -80, "KR": -35, "TH": -40,
+                          "MY": -30, "CN": -30, "JP": -60, "HK": -20,
+                          "PH": -60, "VN": -80}
+        rows = []
+        for c in [e for e in ("SG", "ID", "KR", "TH", "MY", "CN", "JP")
+                  if e in asia]:
+            s = asia[c]
+            rows.append({"market": ASIA_NAMES.get(c, c),
+                         "usd_asset_yield": round(usd_asset, 2),
+                         "r_usd": round(r_usd, 2),
+                         "r_local": round(snap_yield(s, 1), 2),
+                         "local_asset_yield": round(snap_yield(s, 10), 2),
+                         "basis_bp": basis_defaults.get(c, -40)})
+        st.caption(f"Live inputs: USD 1y {r_usd:.2f}%, USD IG asset yield "
+                   f"{usd_asset:.2f}% (US 10y {us10:.2f}% + IG OAS "
+                   f"{oas_bp:.0f}bp). Local 1y/10y from ABO curves. "
+                   "X-ccy basis is editable (no free source).")
+        mk = st.data_editor(pd.DataFrame(rows), hide_index=True)
+        table = fx.pickup_table(
+            {r["market"]: {k: r[k] for k in
+                           ("usd_asset_yield", "r_usd", "r_local",
+                            "local_asset_yield", "basis_bp")}
+             for _, r in mk.iterrows()})
+        st.dataframe(table)
+        st.caption("pickup > 0: hedged USD IG credit beats the local 10y "
+                   "govt bond for that investor — the core Asian insurance "
+                   "allocation decision. High-carry markets (ID) usually "
+                   "favour local bonds; low-yield markets (JP) depend "
+                   "heavily on the basis.")
+    else:
+        st.warning("Needs live US curve + ABO curves; using the FX tab "
+                   "editable table instead.")
+
+    st.divider()
+    st.subheader("TAA signal lab — momentum with honest validation")
     eq, eq_live = get_equity()
-    live_badge(eq_live, "S&P 500")
+    live_badge(eq_live, "S&P 500 (global risk proxy)")
     prices = eq["SP500"].dropna()
     asset_ret = prices.pct_change().dropna()
     prices = prices.loc[asset_ret.index]
@@ -293,21 +412,17 @@ with tabs[4]:
     grid = [{"lookback": lb, "skip": sk}
             for lb in (63, 126, 252) for sk in (5, 21)]
     cv = taa.PurgedKFold(n_splits=5, label_horizon=21, embargo_pct=0.02)
-    with st.spinner("Running purged CV over the signal grid..."):
+    with st.spinner("Running purged CV..."):
         res, sel = taa.cv_sharpes(make_position, grid, {"prices": prices},
                                   asset_ret, cv)
     col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Signal grid — purged CV** (train-selected, test-scored)")
-        st.dataframe(res.sort_values("test_sharpe_mean", ascending=False))
+    col1.dataframe(res.sort_values("test_sharpe_mean", ascending=False))
     with col2:
-        st.write("**Selection procedure, out of sample**")
         st.dataframe(sel)
         st.metric("OOS Sharpe of selection", f"{sel['oos_sharpe'].mean():.2f}")
-
     best = res.sort_values("test_sharpe_mean", ascending=False).iloc[0]
-    pos = make_position({"prices": prices},
-                        int(best["lookback"]), int(best["skip"]))
+    pos = make_position({"prices": prices}, int(best["lookback"]),
+                        int(best["skip"]))
     net = taa.backtest(pos, asset_ret)["net"]
     grid_srs = np.array([taa.sharpe(taa.backtest(
         make_position({"prices": prices}, g["lookback"], g["skip"]),
@@ -315,26 +430,184 @@ with tabs[4]:
     dsr = taa.deflated_sharpe(net, n_trials=len(grid),
                               trial_sr_var=float(grid_srs.var()))
     m = st.columns(3)
-    m[0].metric("Best config net Sharpe", f"{taa.sharpe(net):.2f}")
+    m[0].metric("Best net Sharpe", f"{taa.sharpe(net):.2f}")
     m[1].metric("Probabilistic Sharpe", f"{taa.probabilistic_sharpe(net):.0%}")
     m[2].metric(f"Deflated Sharpe ({len(grid)} trials)", f"{dsr:.0%}")
-    verdict = ("✅ survives multiple-testing correction" if dsr > 0.95
-               else "⚠️ NOT proven — likely selection bias; do not deploy "
-                    "on this evidence")
-    st.info(f"Verdict: {verdict}")
-    st.line_chart((1 + net).cumprod(), height=260)
+    st.info("Verdict: " + ("✅ survives multiple-testing correction"
+                           if dsr > 0.95 else
+                           "⚠️ NOT proven — likely selection bias; do not "
+                           "deploy on this evidence"))
+
+    st.divider()
+    st.subheader("View-conditioned allocation (entropy pooling)")
+    mkt2, mkt_live2 = get_market()
+    y10s = us_yields[10.0].resample("ME").last() \
+        if 10.0 in us_yields.columns else None
+    if y10s is not None:
+        eq_m = (1 + mkt2["equity_ret"]).resample("ME").prod() - 1
+        oas = mkt2["credit_spread_bp"].resample("ME").last()
+        dy = y10s.diff().reindex(eq_m.index)
+        govt_m = (y10s.reindex(eq_m.index) / 12 - 8.0 * dy) / 100
+        cred_m = govt_m + (oas.reindex(eq_m.index) / 12
+                           - 5.5 * oas.diff().reindex(eq_m.index)) / 1e4
+        hist = pd.DataFrame({"govt": govt_m, "credit": cred_m,
+                             "equity": eq_m}).dropna()
+        rng = np.random.default_rng(5)
+        scen = hist.to_numpy()[rng.integers(0, len(hist), 1000)]
+        view_eq = st.slider("View: expected EQUITY return (% p.a.)",
+                            -10.0, 15.0, 4.0, 0.5) / 100 / 12
+        view_cr = st.slider("View: expected CREDIT return (% p.a.)",
+                            -5.0, 10.0, 4.5, 0.5) / 100 / 12
+        ep = al.EntropyPooling().fit(
+            scen, np.vstack([al.view_on_mean(scen, 2),
+                             al.view_on_mean(scen, 1)]),
+            [view_eq, view_cr])
+        mu_post, Sigma_post = ep.posterior_moments()
+        ra = st.slider("Risk aversion", 1.0, 10.0, 4.0, 0.5)
+        w = al.mv_optimize(mu_post, Sigma_post, risk_aversion=ra, w_max=0.7)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.dataframe(pd.DataFrame(
+                {"E[r] % p.a.": np.round(mu_post * 12 * 100, 2),
+                 "vol % p.a.": np.round(np.sqrt(np.diag(Sigma_post) * 12)
+                                        * 100, 2),
+                 "weight": np.round(w, 3)}, index=hist.columns))
+            st.metric("Effective scenarios (ENS)",
+                      f"{ep.effective_n:,.0f} / 1,000")
+        with col2:
+            fig, ax = plt.subplots(figsize=(6, 3.2))
+            ax.bar(hist.columns, w, color=["#4477AA", "#EE6677", "#228833"])
+            ax.set_ylabel("weight")
+            ax.set_title("View-conditioned allocation")
+            st.pyplot(fig, clear_figure=True)
+            st.caption("Low ENS = the view is fighting the data — treat "
+                       "the output weights with suspicion.")
 
 
-# --------------------------------------------------------------- managers
-with tabs[5]:
-    st.caption(":blue[● SYNTHETIC] manager returns are simulated "
-               "(no public manager data); factors and machinery are real")
+# ====================================================== stress & resilience
+with tabs[3]:
+    st.caption("*Objective: forward-looking scenario analysis & stress "
+               "testing across rates, spreads, FX and geopolitical risk — "
+               "assess portfolio resilience, inform positioning.*")
+
+    asia, as_ofs = get_asia_curves()
+    jgb_c, _ = get_jgb_curve()
+    ecb_c, _ = get_ecb_curve()
+
+    st.subheader("Discounting basis")
+    curve_opts = {"United States (UST, DNS-fitted)": ("dns", us_yields)}
+    if jgb_c is not None:
+        curve_opts["Japan (JGB, DNS-fitted)"] = ("dns", jgb_c)
+    if ecb_c is not None:
+        curve_opts["Euro area (AAA, DNS-fitted)"] = ("dns", ecb_c)
+    for c in ("SG", "ID", "KR", "TH", "MY"):
+        if c in asia:
+            curve_opts[f"{ASIA_NAMES[c]} (ABO snapshot)"] = ("snap", asia[c])
+    pick = st.selectbox("Liability discount curve", list(curve_opts))
+    kind, obj = curve_opts[pick]
+    if kind == "dns":
+        mdl = fit_dns(obj)
+        curve_fn = lambda t: ns_loadings(t, mdl.lam) \
+            @ mdl.factors.iloc[-1].to_numpy() / 100
+    else:
+        curve_fn = data_global.curve_fn_from_snapshot(obj)
+
+    st.subheader("Portfolio & liabilities")
+    c = st.columns(5)
+    mv = c[0].number_input("Assets MV (mn)", 1000.0, 1e6, 10_000.0,
+                           step=500.0)
+    credit_w = c[1].number_input("Credit weight", 0.0, 1.0, 0.45, 0.05)
+    spread_dur = c[2].number_input("Spread duration", 0.0, 15.0, 5.5, 0.5)
+    eq_w = c[3].number_input("Equity weight", 0.0, 1.0, 0.08, 0.01)
+    fx_w = c[4].number_input("Unhedged FX weight", 0.0, 1.0, 0.05, 0.01)
+    krd_df = st.data_editor(pd.DataFrame(
+        {"tenor": [2, 5, 10, 20, 30], "krd": [0.4, 1.2, 3.0, 2.4, 1.0]}),
+        hide_index=True, width=350)
+    pf = stress.Portfolio(mv=mv,
+                          krd=dict(zip(krd_df["tenor"], krd_df["krd"])),
+                          spread_dur=spread_dur, credit_weight=credit_w,
+                          equity_weight=eq_w, fx_unhedged_weight=fx_w)
+    lc = st.columns(3)
+    cf1 = lc[0].number_input("Liab CF yrs 1-10 (mn/yr)", 0.0, 1e5, 380.0)
+    cf2 = lc[1].number_input("Liab CF yrs 11-30 (mn/yr)", 0.0, 1e5, 300.0)
+    cf3 = lc[2].number_input("Liab CF yrs 31-40 (mn/yr)", 0.0, 1e5, 150.0)
+    liab = stress.LiabilityBook(cashflows=np.concatenate(
+        [np.full(10, cf1), np.full(20, cf2), np.full(10, cf3)]))
+
+    gap = stress.duration_gap(pf, liab, curve_fn,
+                              asset_dur=sum(pf.krd.values()))
+    m = st.columns(4)
+    m[0].metric("Liability PV (mn)", f"{gap['liab_pv']:,.0f}")
+    m[1].metric("Duration gap (yrs)", f"{gap['dur_gap']:.2f}")
+    m[2].metric("Economic surplus (mn)", f"{gap['surplus']:,.0f}")
+    m[3].metric("Surplus Δ +100bp (mn)", f"{gap['surplus_chg_+100bp']:,.0f}")
+    st.caption(f"Discounting on: {pick}. Same liability book discounted on "
+               "a high-yield curve (ID) shows a smaller PV / duration than "
+               "on JGBs — the cross-entity comparison AIM runs regionally.")
+
+    col1, col2 = st.columns(2)
+    col1.dataframe(stress.krd_gap(pf, liab, curve_fn))
+    col2.dataframe(pd.Series(stress.capital_proxy(pf), name="value"))
+    col2.caption("Capital proxy is illustrative only, NOT a regulatory "
+                 "calculation.")
+
+    st.subheader("Scenario library — market & geopolitical")
+    scenarios = {
+        "+100bp parallel": {"rates": {k: 100 for k in pf.krd}},
+        "Bear steepener": {"rates": {2: 20, 5: 50, 10: 90, 20: 110, 30: 120}},
+        "Fed shock +150bp": {"rates": {k: 150 for k in pf.krd},
+                             "spreads_bp": 40, "equity_pct": -8,
+                             "fx_pct": -4},
+        "Taper tantrum '13": {"rates": {k: 80 for k in pf.krd},
+                              "spreads_bp": 60, "equity_pct": -6,
+                              "fx_pct": -8},
+        "Credit blowout (GFC)": {"spreads_bp": 250, "equity_pct": -35,
+                                 "rates": {k: -60 for k in pf.krd}},
+        "Asia FX crisis '97-style": {"fx_pct": -20, "spreads_bp": 120,
+                                     "equity_pct": -15,
+                                     "rates": {2: 150, 5: 120, 10: 90,
+                                               20: 70, 30: 60}},
+        "China hard landing": {"rates": {k: -50 for k in pf.krd},
+                               "spreads_bp": 180, "equity_pct": -28,
+                               "fx_pct": -10},
+        "Taiwan strait escalation": {"rates": {k: -40 for k in pf.krd},
+                                     "spreads_bp": 150, "equity_pct": -25,
+                                     "fx_pct": -12},
+        "Oil supply shock": {"rates": {k: 60 for k in pf.krd},
+                             "spreads_bp": 80, "equity_pct": -12,
+                             "fx_pct": -6},
+    }
+    res = stress.run_scenarios(pf, scenarios)
+    fig, ax = plt.subplots(figsize=(11, 4.2))
+    res[["rates", "spreads", "equity", "fx"]].plot(
+        kind="bar", stacked=True, ax=ax,
+        color=["#4477AA", "#EE6677", "#228833", "#CCBB44"])
+    ax.plot(range(len(res)), res["total"], "kD", label="total")
+    ax.axhline(0, color="k", lw=0.7); ax.legend()
+    ax.set_ylabel("P&L (mn)"); plt.xticks(rotation=18, ha="right")
+    ax.set_title("Scenario P&L decomposition")
+    st.pyplot(fig, clear_figure=True)
+    st.dataframe(res)
+    st.caption("Geopolitical scenarios are stylized multi-factor shocks "
+               "(risk-off: rates rally, spreads/FX/equity sell off; "
+               "inflationary: rates and spreads up together). Calibrate "
+               "against history or an internal scenario committee before "
+               "using for actual steering.")
+
+
+# ========================================================= manager oversight
+with tabs[4]:
+    st.caption("*Objective: support asset-manager oversight — evaluation, "
+               "monitoring, performance assessment.*")
+    st.caption(":blue[● SYNTHETIC] manager returns are simulated (no public "
+               "manager data); the estimation machinery is real")
     rng = np.random.default_rng(11)
     T, n_mgr = 120, 20
     fac = pd.DataFrame(rng.normal(0.004, 0.03, (T, 2)),
                        columns=["mkt", "credit"],
-                       index=pd.date_range("2016-01-31", periods=T, freq="ME"))
-    true_alpha = np.zeros(n_mgr); true_alpha[[3, 11]] = 0.0025   # 2 skilled
+                       index=pd.date_range("2016-01-31", periods=T,
+                                           freq="ME"))
+    true_alpha = np.zeros(n_mgr); true_alpha[[3, 11]] = 0.0025
     rows, rets = [], {}
     for i in range(n_mgr):
         b = rng.uniform(0.6, 1.1), rng.uniform(0.0, 0.5)
@@ -346,73 +619,20 @@ with tabs[5]:
         rows.append({"manager": f"mgr_{i:02d}",
                      "alpha_ann_%": round(out["alpha_ann_%"], 2),
                      "alpha_t": round(out["alpha_t"], 2),
-                     "pval": round(out["pval"], 4), "r2": round(out["r2"], 2)})
+                     "pval": round(out["pval"], 4),
+                     "r2": round(out["r2"], 2)})
     panel = pd.DataFrame(rows).set_index("manager")
     bh = managers.benjamini_hochberg(panel["pval"], fdr=0.10)
     panel["BH significant (FDR 10%)"] = bh["significant_at_FDR"]
-    naive = (panel["alpha_t"].abs() > 2).sum()
     col1, col2 = st.columns([3, 2])
-    with col1:
-        st.write("**Alpha panel with Newey-West t-stats + BH-FDR control**")
-        st.dataframe(panel.sort_values("alpha_t", ascending=False), height=420)
+    col1.dataframe(panel.sort_values("alpha_t", ascending=False), height=420)
     with col2:
-        st.metric("Naive |t|>2 'skilled'", int(naive))
-        st.metric("BH-FDR survivors", int(panel["BH significant (FDR 10%)"].sum()))
-        st.caption("True skilled managers in the simulation: 2 "
-                   "(mgr_03, mgr_11). Naive screens over-hire; FDR control "
-                   "is the fix.")
+        st.metric("Naive |t|>2 'skilled'", int((panel["alpha_t"].abs() > 2).sum()))
+        st.metric("BH-FDR survivors",
+                  int(panel["BH significant (FDR 10%)"].sum()))
+        st.caption("2 truly skilled managers seeded (mgr_03, mgr_11). "
+                   "Naive t-stat screens over-hire; FDR control is the fix.")
         pick = st.selectbox("Style-drift monitor", list(rets))
         rb = managers.rolling_betas(pd.Series(rets[pick], index=fac.index),
                                     fac, window=36)
         st.line_chart(rb, height=220)
-
-
-# -------------------------------------------------------------- allocation
-with tabs[6]:
-    mkt, mkt_live = get_market()
-    live_badge(mkt_live, "scenario engine inputs (equity, rates, credit)")
-    y10 = yields[10.0].resample("ME").last() if 10.0 in yields.columns else None
-    eq_m = (1 + mkt["equity_ret"]).resample("ME").prod() - 1
-    oas = mkt["credit_spread_bp"].resample("ME").last()
-    dy = y10.diff().reindex(eq_m.index)
-    doas = oas.diff()
-    govt_m = (y10.reindex(eq_m.index) / 12 - 8.0 * dy) / 100
-    cred_m = govt_m + (oas.reindex(eq_m.index) / 12 - 5.5 * doas) / 1e4
-    hist = pd.DataFrame({"govt": govt_m, "credit": cred_m,
-                         "equity": eq_m}).dropna()
-    st.caption(f"Monthly joint scenarios from {hist.index[0]:%Y-%m} to "
-               f"{hist.index[-1]:%Y-%m} ({len(hist)} obs), bootstrapped to "
-               "1,000 scenarios. Sleeves: govt (10y, dur 8), IG credit "
-               "(dur 5.5), equity.")
-    rng = np.random.default_rng(5)
-    scen = hist.to_numpy()[rng.integers(0, len(hist), 1000)]
-
-    view_eq = st.slider("View: expected EQUITY return (% p.a.)",
-                        -10.0, 15.0, 4.0, 0.5) / 100 / 12
-    view_cr = st.slider("View: expected CREDIT return (% p.a.)",
-                        -5.0, 10.0, 4.5, 0.5) / 100 / 12
-    ep = al.EntropyPooling().fit(
-        scen,
-        np.vstack([al.view_on_mean(scen, 2), al.view_on_mean(scen, 1)]),
-        [view_eq, view_cr])
-    mu_post, Sigma_post = ep.posterior_moments()
-
-    ra = st.slider("Risk aversion", 1.0, 10.0, 4.0, 0.5)
-    w = al.mv_optimize(mu_post, Sigma_post, risk_aversion=ra, w_max=0.7)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Posterior (entropy-pooled) moments, monthly**")
-        st.dataframe(pd.DataFrame(
-            {"E[r] % p.a.": np.round(mu_post * 12 * 100, 2),
-             "vol % p.a.": np.round(np.sqrt(np.diag(Sigma_post) * 12) * 100, 2),
-             "weight": np.round(w, 3)}, index=hist.columns))
-        st.metric("Effective scenarios (ENS)", f"{ep.effective_n:,.0f} / 1,000")
-    with col2:
-        fig, ax = plt.subplots(figsize=(6, 3.5))
-        ax.bar(hist.columns, w, color=["#4477AA", "#EE6677", "#228833"])
-        ax.set_title("View-conditioned allocation (long-only MV)")
-        ax.set_ylabel("weight")
-        st.pyplot(fig, clear_figure=True)
-        st.caption("Pipeline: historical scenarios → entropy-pooling tilt "
-                   "to the view → constrained optimizer. Low ENS = the view "
-                   "is fighting the data.")

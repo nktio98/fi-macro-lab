@@ -111,10 +111,29 @@ python3 run_demo.py       # console report + charts in outputs/
   required, optional `FRED_API_KEY` for full history; 24h disk cache.
 - `python3 run_real_demo.py` — DNS + regimes + ALM stress on live data.
 
-### 10. `app.py` — Streamlit dashboard (live data)
-- All modules interactive in the browser: `streamlit run app.py`.
-- Deployable free on Streamlit Community Cloud (push repo to GitHub,
-  point share.streamlit.io at `app.py`).
+### 10. `data_global.py` — Multi-economy data (Asia + EU)
+- AsianBondsOnline (ADB): live LCY government yield-curve snapshots for
+  ASEAN+3 — China, Hong Kong, **Indonesia**, Japan, Korea, Malaysia,
+  Philippines, **Singapore**, Thailand, Vietnam (+WTD/MTD/YTD changes).
+- Japan MoF: full JGB curve history (daily, 1974→, 1Y-40Y).
+- ECB: euro-area AAA spot-curve history; EUR reference FX (adds IDR).
+- FRED OECD panel: monthly 10y yields for JP/KR/AU/DE/FR/IT/GB/US.
+- All free, no API key; same 24h disk cache.
+
+### 11. `app.py` — Streamlit dashboard (Asia-focused, live data)
+- Organized around the strategist's three core objectives:
+  1. *Economic & capital-market analysis* → *Rates & curves* (Asian curve
+     monitor, DNS labs for UST/JGB/euro AAA, global 10y history) and
+     *FX & regimes* (Asian FX monitor incl. IDR, regime detection on any
+     series, ECM fair value with real rate differentials).
+  2. *Translate views into TAA* → *Strategy & TAA* (hedged-pickup table
+     computed from LIVE curves, purged-CV signal lab, entropy-pooling
+     allocation).
+  3. *Scenario analysis & stress testing* → *Stress & resilience*
+     (liability discounting on any economy's curve — UST/JGB/euro/SGS/
+     IndoGB —, KRD surplus gaps, market + geopolitical scenario library).
+- Plus *Manager oversight* (synthetic panel, real machinery).
+- Run: `streamlit run app.py`; deploy free on Streamlit Community Cloud.
 
 ## Roadmap (extensions)
 - MAS/SGS local-market data feeds; AFNS/ACM term premium; DCC-GARCH
