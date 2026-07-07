@@ -42,7 +42,29 @@ KRD additivity, entropy-pooling view attainment, BL limits).
 - `ACMTermPremium`: Adrian-Crump-Moench 3-step regression term premium;
   decomposes the 10y into expected short rates + term premium (identity
   tested exactly; pricing RMSE tested < 50bp).
-- Remaining upgrade path: shadow-rate extension for near-ZLB markets.
+- `smith_wilson`: EIOPA / MAS RBC-2 style curve extrapolation — exact
+  repricing of liquid points, convergence to the UFR beyond the last
+  liquid point (both tested). Plugs straight into liability discounting.
+
+### 1b. `statespace.py` — Kalman-filter MLE + shadow rates
+- `KalmanDNS`: ONE-STEP estimation of the DNS state-space model — all
+  parameters (λ, VAR dynamics, factor and measurement noise) jointly by
+  maximum likelihood via the Kalman filter (prediction-error
+  decomposition), initialized at the consistent two-step estimates;
+  RTS-smoothed factors. Tested: likelihood never below the two-step
+  starting point, recovers the true λ on simulated data.
+- `ShadowRateDNS`: Black (1995) shadow rates via an UNSCENTED Kalman
+  filter on the censored observation y = max(shadow curve, 0). Tested:
+  recovers negative shadow short rates from panels where the truth dips
+  below the bound. (Yield-level censoring — a documented simplification
+  of Krippner/Wu-Xia, which floor the short rate under Q.)
+
+### 1c. `bvar.py` — Minnesota BVAR scenario generator
+- Conjugate NIW Minnesota prior via dummy observations (Banbura et al.);
+  exact posterior simulation feeding `stress.monte_carlo_pnl` — the
+  shrinkage keeps posterior-predictive scenarios sane on short samples.
+  Tested: loose prior recovers the true VAR, tight prior shrinks to the
+  prior mean.
 
 ### 2. `regimes.py` — Regime detection
 - `GaussianMS`: 2-state Markov-switching (Hamilton filter + EM), from scratch.
@@ -94,6 +116,10 @@ python3 run_demo.py       # console report + charts in outputs/
 - Factor regressions with Newey-West (HAC) alpha t-stats.
 - Benjamini-Hochberg FDR control across the manager panel (the fix for
   "1-in-20 managers looks skilled by luck").
+- `bootstrap_skill_test`: Fama-French (2010) luck-vs-skill bootstrap —
+  the whole panel re-simulated under a zero-alpha null; is the best
+  manager's t-stat explainable by luck across this many trials? Tested
+  both ways (null panel not flagged, seeded alpha detected).
 - Rolling-beta style-drift / mandate-compliance monitor; appraisal
   metrics (IR, tracking error, hit rate).
 - Demo: `python3 run_manager_demo.py`

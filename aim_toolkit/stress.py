@@ -140,6 +140,9 @@ def monte_carlo_pnl(p: Portfolio, factor_moves: pd.DataFrame,
         draws = F[rng.integers(0, len(F), n_sims)]
     elif method == "normal":
         draws = rng.multivariate_normal(F.mean(0), np.cov(F.T), n_sims)
+    elif method == "given":
+        draws = F                    # rows ARE the simulation (e.g. BVAR)
+        n_sims = len(F)
     else:
         raise ValueError(f"unknown method {method!r}")
     pnl = np.empty(n_sims)

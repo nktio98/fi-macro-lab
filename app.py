@@ -28,8 +28,11 @@ import streamlit as st
 from aim_toolkit import allocation as al
 from aim_toolkit import data, data_global, data_live, fx, macro, managers, \
     monitoring, nowcast, stress, taa
+from aim_toolkit.bvar import MinnesotaBVAR
 from aim_toolkit.regimes import GaussianMS, JumpModel, regime_summary
-from aim_toolkit.yield_curve import ACMTermPremium, DNSModel, ns_loadings
+from aim_toolkit.statespace import KalmanDNS, ShadowRateDNS
+from aim_toolkit.yield_curve import ACMTermPremium, DNSModel, ns_loadings, \
+    smith_wilson
 
 st.set_page_config(page_title="AIM Strategist Dashboard — Asia",
                    layout="wide")
@@ -224,6 +227,50 @@ with tabs[0]:
         ax.set_title("VAR(1) factor-forecast curve"); ax.legend()
         ax.grid(alpha=0.3)
         st.pyplot(fig, clear_figure=True)
+
+    if st.checkbox("Refit with one-step Kalman MLE (joint estimation of "
+                   "λ, VAR, and noise — ~30-60s first run)"):
+        @st.cache_data(show_spinner="Running Kalman-filter MLE...")
+        def fit_kalman(y: pd.DataFrame):
+            return KalmanDNS(maxiter=150).fit(y)
+        km = fit_kalman(ylds)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("λ (MLE)", f"{km.lam:.3f}",
+                  delta=f"{km.lam - model.lam:+.3f} vs two-step")
+        k2.metric("RMSE (MLE)", f"{km.rmse_bp:.1f} bp",
+                  delta=f"{km.rmse_bp - model.rmse_bp:+.1f} bp",
+                  delta_color="inverse")
+        k3.metric("Δ log-likelihood", f"{km.loglik - km.loglik_init:+,.0f}")
+        k4.metric("Converged", "yes" if km.converged else "max-iter")
+        st.caption("Two-step (fit factors, then VAR) is consistent but "
+                   "ignores that factors are estimated; one-step MLE "
+                   "estimates everything jointly through the Kalman "
+                   "filter and weighs noisy maturities properly. "
+                   "Smoothed factors also give honest uncertainty bands "
+                   "for the forecast.")
+
+    if jgb is not None:
+        with st.expander("Shadow-rate view — Japan at the ZLB (UKF)"):
+            @st.cache_data(show_spinner="Running unscented Kalman filter...")
+            def fit_shadow(y: pd.DataFrame):
+                return ShadowRateDNS(lb=0.0).fit(y)
+            sr = fit_shadow(jgb)
+            sss = sr.shadow_short_rate(0.25)
+            obs_short = jgb.iloc[:, 0]
+            cmp_df = pd.DataFrame({"observed short JGB yield": obs_short,
+                                   "shadow short rate": sss})
+            st.line_chart(cmp_df, height=280)
+            st.metric("Shadow short rate (latest)",
+                      f"{sss.iloc[-1]:.2f} %",
+                      help="below the observed rate when the bound binds")
+            st.caption("Black (1995): the observed yield is the shadow "
+                       "yield floored at 0. Through 2010-2021 the shadow "
+                       "rate goes NEGATIVE while the observed rate sits "
+                       "at zero — measuring how much easing the ZLB hid. "
+                       "Implementation floors the yield equation and "
+                       "filters with an unscented KF; a full Krippner/"
+                       "Wu-Xia model floors the short rate under Q — "
+                       "documented simplification.")
 
     st.divider()
     st.subheader("Global 10y government yields — history")
@@ -682,8 +729,39 @@ with tabs[4]:
         mdl = fit_dns(obj)
         curve_fn = lambda t: ns_loadings(t, mdl.lam) \
             @ mdl.factors.iloc[-1].to_numpy() / 100
+        liquid_tenors = obj.columns.to_numpy(float)
+        liquid_rates = np.asarray(curve_fn(liquid_tenors)) * 100
     else:
         curve_fn = data_global.curve_fn_from_snapshot(obj)
+        liquid_tenors = obj.index.to_numpy(float)
+        liquid_rates = obj["yield_pct"].to_numpy(float)
+
+    sw_col1, sw_col2 = st.columns([2, 1])
+    use_sw = sw_col1.checkbox(
+        "Smith-Wilson UFR extrapolation beyond the last liquid point "
+        "(EIOPA / MAS RBC-2 style)")
+    if use_sw:
+        ufr_pct = sw_col2.number_input("UFR (%)", 1.0, 6.0, 3.8, 0.1)
+        curve_fn = smith_wilson(liquid_tenors, liquid_rates,
+                                ufr=ufr_pct / 100, alpha=0.15)
+        llp = liquid_tenors.max()
+        t_plot = np.linspace(0.5, 60, 120)
+        fig, ax = plt.subplots(figsize=(9, 3))
+        ax.plot(t_plot, np.asarray(curve_fn(t_plot)) * 100, lw=1.5,
+                label="Smith-Wilson curve")
+        ax.plot(liquid_tenors, liquid_rates, "o", label="market points")
+        ax.axvline(llp, color="grey", ls=":", label=f"LLP {llp:.0f}y")
+        ax.axhline(ufr_pct, color="red", ls="--", lw=0.8,
+                   label=f"UFR {ufr_pct}%")
+        ax.set_xlabel("maturity (yrs)"); ax.set_ylabel("%"); ax.legend()
+        ax.grid(alpha=0.3)
+        st.pyplot(fig, clear_figure=True)
+        st.caption("Liability cash flows beyond the last liquid market "
+                   "point are discounted on the regulator-style "
+                   "extrapolation converging to the UFR — the market has "
+                   "no 40y price, so the assumption IS the valuation. "
+                   "Compare liability PV with the toggle on/off to see "
+                   "how much of the balance sheet rests on it.")
 
     st.subheader("Portfolio & liabilities")
     c = st.columns(5)
@@ -785,10 +863,21 @@ with tabs[4]:
         }).dropna()
         method_mc = st.radio("Simulation method",
                              ["bootstrap (historical rows, keeps tails)",
-                              "normal (fitted mean/cov)"], horizontal=True)
-        mc = stress.monte_carlo_pnl(
-            pf, moves, n_sims=10_000,
-            method="bootstrap" if method_mc.startswith("boot") else "normal")
+                              "normal (fitted mean/cov)",
+                              "BVAR posterior predictive (Minnesota prior)"],
+                             horizontal=True)
+        if method_mc.startswith("BVAR"):
+            @st.cache_data(show_spinner="Fitting BVAR + simulating...")
+            def bvar_draws(mv_df: pd.DataFrame):
+                bv = MinnesotaBVAR(lags=1, lambda1=0.2).fit(mv_df)
+                return bv.simulate(h=1, n_draws=10_000, seed=0)
+            mc = stress.monte_carlo_pnl(pf, bvar_draws(moves),
+                                        method="given")
+        else:
+            mc = stress.monte_carlo_pnl(
+                pf, moves, n_sims=10_000,
+                method="bootstrap" if method_mc.startswith("boot")
+                else "normal")
         m = st.columns(5)
         m[0].metric("VaR 95 (mn)", f"{mc['var95']:,.0f}")
         m[1].metric("VaR 99 (mn)", f"{mc['var99']:,.0f}")
@@ -852,3 +941,35 @@ with tabs[5]:
         rb = managers.rolling_betas(pd.Series(rets[pick], index=fac.index),
                                     fac, window=36)
         st.line_chart(rb, height=220)
+
+    st.divider()
+    st.subheader("Luck vs skill — Fama-French (2010) bootstrap")
+
+    @st.cache_data(show_spinner="Bootstrapping the zero-alpha null...")
+    def run_boot(rets_key: int):
+        R = pd.DataFrame(rets, index=fac.index)
+        return managers.bootstrap_skill_test(R, fac, n_boot=500, seed=7)
+
+    boot = run_boot(0)
+    b1, b2 = st.columns([3, 2])
+    with b1:
+        ranks = np.arange(1, len(boot["actual_sorted_t"]) + 1)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.fill_between(ranks, boot["null_5"], boot["null_95"], alpha=0.2,
+                        color="grey", label="luck alone (5-95% band)")
+        ax.plot(ranks, boot["null_50"], "--", color="grey",
+                label="luck median")
+        ax.plot(ranks, boot["actual_sorted_t"], "o-", color="#EE6677",
+                label="actual panel")
+        ax.set_xlabel("manager rank (worst → best alpha t-stat)")
+        ax.set_ylabel("alpha t-stat"); ax.legend(); ax.grid(alpha=0.3)
+        st.pyplot(fig, clear_figure=True)
+    with b2:
+        st.metric("P(luck beats best manager)", f"{boot['p_top']:.1%}")
+        st.caption("Every manager is re-simulated with alpha forced to "
+                   "ZERO (factor exposure + resampled residuals); the "
+                   "grey band is what a panel of skill-less managers "
+                   "produces from luck across this many trials. Actual "
+                   "t-stats above the band at the top ranks = skill the "
+                   "null can't explain — the cross-sectional complement "
+                   "to the per-manager BH-FDR screen above.")

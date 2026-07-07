@@ -88,3 +88,47 @@ def alpha_pvalue_from_t(t: float, dof: int) -> float:
     """Two-sided p-value from t-stat (normal approx is fine for dof>60)."""
     from scipy.stats import t as tdist
     return float(2 * (1 - tdist.cdf(abs(t), dof)))
+
+
+def bootstrap_skill_test(returns: pd.DataFrame, factors: pd.DataFrame,
+                         n_boot: int = 1000, seed: int = 0) -> dict:
+    """Fama-French (2010) luck-vs-skill bootstrap across a manager panel.
+
+    Each manager's returns are re-simulated under a ZERO-ALPHA null
+    (fitted factor exposure + resampled residuals), the whole panel is
+    re-estimated per bootstrap, and the cross-section of alpha t-stats
+    under pure luck is collected. If the ACTUAL best t-stat sits inside
+    the null distribution of best t-stats, your 'star manager' is what
+    luck alone produces across this many managers.
+
+    Returns dict(actual_sorted_t, null_percentiles(5/50/95 per rank),
+    p_top = P(null max-t >= actual max-t)).
+    """
+    rng = np.random.default_rng(seed)
+    df = pd.concat([returns, factors], axis=1).dropna()
+    R = df[returns.columns].to_numpy()
+    X = np.column_stack([np.ones(len(df)),
+                         df[factors.columns].to_numpy()])
+    T, M = R.shape
+    beta, *_ = np.linalg.lstsq(X, R, rcond=None)
+    resid = R - X @ beta
+    fitted_null = X @ np.vstack([np.zeros(M), beta[1:]])   # alpha := 0
+
+    def panel_tstats(Rb):
+        b, *_ = np.linalg.lstsq(X, Rb, rcond=None)
+        e = Rb - X @ b
+        XtX_inv_00 = np.linalg.inv(X.T @ X)[0, 0]
+        s2 = (e ** 2).sum(0) / (T - X.shape[1])
+        return b[0] / np.sqrt(s2 * XtX_inv_00)
+
+    actual_t = np.sort(panel_tstats(R))
+    null_sorted = np.empty((n_boot, M))
+    for b in range(n_boot):
+        idx = rng.integers(0, T, T)                        # iid time resample
+        Rb = fitted_null + resid[idx]
+        null_sorted[b] = np.sort(panel_tstats(Rb))
+    pct = np.percentile(null_sorted, [5, 50, 95], axis=0)
+    p_top = float((null_sorted[:, -1] >= actual_t[-1]).mean())
+    return {"actual_sorted_t": actual_t,
+            "null_5": pct[0], "null_50": pct[1], "null_95": pct[2],
+            "p_top": p_top, "n_boot": n_boot}

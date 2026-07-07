@@ -81,6 +81,43 @@ class VAR1:
         return np.linalg.solve(np.eye(len(self.c)) - self.A, self.c)
 
 
+def smith_wilson(tenors: np.ndarray, zero_rates_pct: np.ndarray,
+                 ufr: float = 0.038, alpha: float = 0.15):
+    """Smith-Wilson curve interpolation/extrapolation (EIOPA / MAS RBC-2
+    style): fits the observed zero curve EXACTLY and converges to the
+    ultimate forward rate (UFR) beyond the last liquid point.
+
+    tenors in years, zero rates in % (continuous compounding assumed).
+    ufr in decimals (as an annual rate; converted to continuous inside).
+    alpha = convergence speed. Returns f(t)->zero rate in DECIMALS for
+    any t -- drop-in for the liability curve_fn.
+
+    This is the regulator-prescribed answer to 'what discount rate for a
+    40y cash flow when the market stops at 30y'."""
+    u = np.asarray(tenors, dtype=float)
+    z = np.asarray(zero_rates_pct, dtype=float) / 100
+    f_inf = np.log(1 + ufr)
+    P = np.exp(-z * u)                        # market zero-coupon prices
+
+    def W(t, s):
+        t, s = np.asarray(t, float), np.asarray(s, float)
+        mn, mx = np.minimum.outer(t, s), np.maximum.outer(t, s)
+        return np.exp(-f_inf * np.add.outer(t, s)) * (
+            alpha * mn - 0.5 * np.exp(-alpha * mx)
+            * (np.exp(alpha * mn) - np.exp(-alpha * mn)))
+
+    zeta = np.linalg.solve(W(u, u), P - np.exp(-f_inf * u))
+
+    def curve_fn(t):
+        t = np.atleast_1d(np.asarray(t, dtype=float))
+        t = np.where(t <= 0, 1e-6, t)
+        price = np.exp(-f_inf * t) + W(t, u) @ zeta
+        out = -np.log(np.clip(price, 1e-12, None)) / t
+        return out if out.size > 1 else float(out[0])
+
+    return curve_fn
+
+
 def afns_adjustment(maturities: np.ndarray, lam: float,
                     sig: np.ndarray) -> np.ndarray:
     """AFNS yield-adjustment term (Christensen-Diebold-Rudebusch 2011,
