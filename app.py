@@ -26,9 +26,10 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 from aim_toolkit import allocation as al
-from aim_toolkit import data, data_global, data_live, fx, managers, stress, taa
+from aim_toolkit import data, data_global, data_live, fx, macro, managers, \
+    monitoring, nowcast, stress, taa
 from aim_toolkit.regimes import GaussianMS, JumpModel, regime_summary
-from aim_toolkit.yield_curve import DNSModel, ns_loadings
+from aim_toolkit.yield_curve import ACMTermPremium, DNSModel, ns_loadings
 
 st.set_page_config(page_title="AIM Strategist Dashboard — Asia",
                    layout="wide")
@@ -137,8 +138,9 @@ st.title("AIM Strategist Dashboard — Asia")
 st.caption("Multi-economy rates · FX · regimes · TAA · ALM stress · manager "
            "oversight — built for regional insurance portfolio strategy")
 
-tabs = st.tabs(["🌏 Rates & curves", "💱 FX & regimes", "🎯 Strategy & TAA",
-                "🛡️ Stress & resilience", "🔍 Manager oversight"])
+tabs = st.tabs(["🌏 Rates & curves", "💱 FX & regimes", "📊 Macro lab",
+                "🎯 Strategy & TAA", "🛡️ Stress & resilience",
+                "🔍 Manager oversight"])
 
 us_yields, us_live = get_us_curve()
 dns_us = fit_dns(us_yields)
@@ -233,6 +235,34 @@ with tabs[0]:
         st.caption("Monthly OECD long-term yields via FRED. Divergence "
                    "US/EU vs JP/KR is the hedged-yield-pickup driver on "
                    "the Strategy tab.")
+
+    st.divider()
+    st.subheader("US term premium — ACM decomposition")
+    if us_live:
+        @st.cache_data(show_spinner="Fitting ACM term-premium model...")
+        def fit_acm(y: pd.DataFrame):
+            return ACMTermPremium().fit(y, k_factors=3, max_years=10)
+        acm = fit_acm(us_yields)
+        fitted10 = acm.fitted_yield(10)
+        rn10 = acm.risk_neutral_yield(10)
+        tp10 = acm.term_premium(10)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("10y model yield", f"{fitted10.iloc[-1]:.2f} %")
+        c2.metric("Expectations part", f"{rn10.iloc[-1]:.2f} %")
+        c3.metric("Term premium", f"{tp10.iloc[-1] * 100:+.0f} bp")
+        c4.metric("Pricing RMSE (10y)", f"{acm.fit_rmse_bp(10):.0f} bp")
+        st.line_chart(pd.DataFrame({
+            "10y yield (model)": fitted10,
+            "expected avg short rate": rn10,
+            "term premium": tp10}), height=320)
+        st.caption("Adrian-Crump-Moench 3-step estimator on the live UST "
+                   "panel. High/positive term premium = you are PAID to "
+                   "extend duration beyond the pure rate view; negative "
+                   "premium = duration is expensive insurance. The "
+                   "expectations line is the market-implied average short "
+                   "rate over 10y — compare against your own Fed view.")
+    else:
+        st.info("ACM needs the live US panel.")
 
 
 # ============================================================ fx & regimes
@@ -345,9 +375,135 @@ with tabs[1]:
                        "the ±2σ band = valuation signal; half-life = how "
                        "fast misvaluation historically decays.")
 
+    st.divider()
+    st.subheader("Minimum-variance hedge ratio")
+    if fxr is not None:
+        eqd, _ = get_equity()
+        hc1, hc2 = st.columns(2)
+        ccy_h = hc1.selectbox("Investor currency", list(fxr.columns),
+                              index=0, key="hr_ccy")
+        method = hc2.radio("Estimator", ["Rolling OLS (126d)", "DCC-GARCH"],
+                           horizontal=True)
+        spot_h = fxr[ccy_h].dropna().iloc[-2000:]
+        fx_ret_h = spot_h.pct_change()
+        eq_usd = eqd["SP500"].pct_change().reindex(spot_h.index)
+        idxh = eq_usd.dropna().index.intersection(fx_ret_h.dropna().index)
+        unhedged = ((1 + eq_usd.loc[idxh]) * (1 + fx_ret_h.loc[idxh]) - 1)
+        if method.startswith("Rolling"):
+            h = fx.min_var_hedge_ratio(unhedged, fx_ret_h.loc[idxh],
+                                       window=126).dropna()
+            st.line_chart(h.clip(-0.5, 2.5), height=260)
+        else:
+            with st.spinner("Fitting GARCH(1,1) ×2 + DCC by MLE..."):
+                out = fx.dcc_hedge_ratio(unhedged, fx_ret_h.loc[idxh])
+            st.line_chart(out["hedge_ratio"].clip(-0.5, 2.5), height=260)
+            st.caption(f"DCC(1,1): a={out['a']:.3f}, b={out['b']:.3f} "
+                       f"(persistence {out['a'] + out['b']:.3f}). "
+                       "Conditional correlation × vol ratio — reacts to "
+                       "regime change in days rather than the ~6 months a "
+                       "rolling window needs.")
+        st.caption(f"S&P 500 held by a {ccy_h} investor; h*=1 is a full "
+                   "hedge of the USD exposure. When the estimate swings "
+                   "materially, a static hedge policy leaves risk (or "
+                   "return) on the table.")
+
+
+# ============================================================== macro lab
+with tabs[2]:
+    st.caption("*Objective: economic analysis — where is the economy right "
+               "now, and how do macro shocks transmit into markets?*")
+
+    st.subheader("GDP nowcast — monthly activity factor + bridge")
+    NC_NAMES = {"ID": "Indonesia", "KR": "Korea", "JP": "Japan",
+                "US": "United States"}
+    ec = st.selectbox("Economy", list(NC_NAMES),
+                      format_func=lambda c: NC_NAMES[c])
+
+    @st.cache_data(ttl=6 * 3600, show_spinner="Building nowcast...")
+    def get_nowcast(economy: str):
+        try:
+            return nowcast.bridge_nowcast(economy)
+        except Exception:
+            return None
+
+    nc = get_nowcast(ec)
+    if nc is None:
+        st.warning("Macro series unavailable (FRED unreachable or series "
+                   "discontinued).")
+    else:
+        m = st.columns(4)
+        m[0].metric("Activity factor",
+                    f"{nc['latest_factor']:+.2f} σ",
+                    help=f"as of {nc['factor_date']:%Y-%m}")
+        m[1].metric("Bridge R²", f"{nc['r2']:.2f}")
+        m[2].metric("Factor t-stat", f"{nc['t_stats'][1]:.1f}")
+        if nc["nowcast"]:
+            q, v = next(iter(nc["nowcast"].items()))
+            m[3].metric(f"Nowcast {q.year}Q{q.quarter}", f"{v:+.2f}% q/q")
+        else:
+            m[3].metric("Nowcast", "GDP printed",
+                        help="no pending quarter to nowcast")
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            st.line_chart(nc["factor"], height=260)
+            st.caption("Monthly activity factor (EM-PCA over the indicator "
+                       "panel; +1σ = clearly above-trend momentum)")
+        with col2:
+            zlast = ((nc["panel"] - nc["panel"].mean())
+                     / nc["panel"].std()).iloc[-1].round(2)
+            st.dataframe(pd.DataFrame({"loading": nc["loadings"].round(2),
+                                       "latest z": zlast}))
+            st.caption("Indicator diagnostics. Low bridge R² (Indonesia) "
+                       "is honest: free monthly data for EM Asia is thin — "
+                       "CPI + exports + commodities, no PMI (licensed). "
+                       "SG/MY/TH have no usable free series at all.")
+
+    st.divider()
+    st.subheader("Shock transmission — local projections (Jordà)")
+    st.caption("If the **US 10y** moves +100bp this month, what happens "
+               "over the following 12 months? One OLS per horizon, "
+               "Newey-West bands — no structural VAR identification "
+               "assumptions.")
+    fxr_m, _ = get_market()
+    fxx = get_fx_all()
+    eqx, _ = get_equity()
+    shock = us_yields[10.0].diff().dropna() if 10.0 in us_yields.columns \
+        else None
+    responses = {}
+    if fxx is not None:
+        for c in ("SGD", "IDR", "KRW", "JPY"):
+            if c in fxx.columns:
+                responses[f"USD/{c} (%)"] = \
+                    np.log(fxx[c].resample("ME").last()).diff() * 100
+    responses["US IG OAS (bp)"] = \
+        fxr_m["credit_spread_bp"].resample("ME").last().diff()
+    responses["S&P 500 (%)"] = \
+        np.log(eqx["SP500"].resample("ME").last()).diff() * 100
+    pick_r = st.selectbox("Response variable", list(responses))
+    if shock is not None:
+        irf = macro.local_projections(responses[pick_r], shock,
+                                      horizons=12, lags=3)
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(irf.index, irf["beta"], "o-", color="#4477AA")
+        ax.fill_between(irf.index, irf["lo"], irf["hi"], alpha=0.2,
+                        color="#4477AA")
+        ax.axhline(0, color="k", lw=0.7)
+        ax.set_xlabel("months after shock")
+        ax.set_ylabel(f"cumulative response, {pick_r}")
+        ax.set_title(f"{pick_r} response to +100bp US 10y shock")
+        ax.grid(alpha=0.3)
+        st.pyplot(fig, clear_figure=True)
+        s = macro.irf_summary(irf)
+        sig = "significant at 90%" if s["significant"] else \
+            "NOT significant at 90% — treat as noise"
+        st.caption(f"Peak response {s['peak_beta']:+.2f} at month "
+                   f"{s['peak_h']} ({sig}). Monthly panel is short where "
+                   "spreads are involved (free BAML data ≈ 3y without a "
+                   "FRED key) — bands widen accordingly.")
+
 
 # ========================================================== strategy & TAA
-with tabs[2]:
+with tabs[3]:
     st.caption("*Objective: translate macro views, market developments and "
                "valuation signals into actionable TAA — consistent with "
                "objectives and constraints.*")
@@ -439,6 +595,23 @@ with tabs[2]:
                            "deploy on this evidence"))
 
     st.divider()
+    st.subheader("Signal governance — post-deployment decay monitor")
+    rep = monitoring.decay_report(net.dropna(), window=252)
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Full-sample IR", f"{rep['full_ir']:.2f}")
+    g2.metric("Recent IR (1y)", f"{rep['recent_ir']:.2f}")
+    g3.metric("IR trend /yr", f"{rep['ir_trend_per_year']:+.2f}")
+    g4.metric("Verdict", rep["verdict"])
+    ir_series = monitoring.rolling_ir(net.dropna(), window=252).dropna()
+    if len(ir_series):
+        st.line_chart(ir_series, height=220)
+    st.caption("The deflated Sharpe above is the gate at INCEPTION; this "
+               "is the ongoing leg — rolling IR of the deployed signal. "
+               "'DECAYING' (negative recent IR + negative trend) means "
+               "retire or re-estimate, regardless of how good the "
+               "original backtest was.")
+
+    st.divider()
     st.subheader("View-conditioned allocation (entropy pooling)")
     mkt2, mkt_live2 = get_market()
     y10s = us_yields[10.0].resample("ME").last() \
@@ -485,7 +658,7 @@ with tabs[2]:
 
 
 # ====================================================== stress & resilience
-with tabs[3]:
+with tabs[4]:
     st.caption("*Objective: forward-looking scenario analysis & stress "
                "testing across rates, spreads, FX and geopolitical risk — "
                "assess portfolio resilience, inform positioning.*")
@@ -594,9 +767,52 @@ with tabs[3]:
                "against history or an internal scenario committee before "
                "using for actual steering.")
 
+    st.divider()
+    st.subheader("Monte Carlo P&L distribution (1-month horizon)")
+    mkt_mc, _ = get_market()
+    fxr_mc = get_fx_all()
+    if 10.0 in us_yields.columns and fxr_mc is not None \
+            and "SGD" in fxr_mc.columns:
+        y10m = us_yields[10.0]
+        moves = pd.DataFrame({
+            "rates_bp": y10m.diff() * 100,
+            "spreads_bp": mkt_mc["credit_spread_bp"]
+            .resample("ME").last().diff(),
+            "equity_pct": ((1 + mkt_mc["equity_ret"])
+                           .resample("ME").prod() - 1) * 100,
+            "fx_pct": fxr_mc["SGD"].resample("ME").last()
+            .pct_change() * 100,
+        }).dropna()
+        method_mc = st.radio("Simulation method",
+                             ["bootstrap (historical rows, keeps tails)",
+                              "normal (fitted mean/cov)"], horizontal=True)
+        mc = stress.monte_carlo_pnl(
+            pf, moves, n_sims=10_000,
+            method="bootstrap" if method_mc.startswith("boot") else "normal")
+        m = st.columns(5)
+        m[0].metric("VaR 95 (mn)", f"{mc['var95']:,.0f}")
+        m[1].metric("VaR 99 (mn)", f"{mc['var99']:,.0f}")
+        m[2].metric("ES 95 (mn)", f"{mc['es95']:,.0f}")
+        m[3].metric("ES 99 (mn)", f"{mc['es99']:,.0f}")
+        m[4].metric("P(loss)", f"{mc['prob_loss']:.0%}")
+        fig, ax = plt.subplots(figsize=(9, 3.2))
+        ax.hist(mc["pnl"], bins=80, color="#4477AA", alpha=0.8)
+        ax.axvline(-mc["var95"], color="orange", ls="--", label="VaR95")
+        ax.axvline(-mc["var99"], color="red", ls="--", label="VaR99")
+        ax.set_xlabel("1-month P&L (mn)"); ax.legend()
+        st.pyplot(fig, clear_figure=True)
+        st.caption(f"Calibrated on {len(moves)} historical monthly factor "
+                   "moves (Δ10y UST, ΔIG OAS, equity return, USD/SGD move) "
+                   "run through the SAME revaluation function as the "
+                   "named scenarios. Bootstrap keeps the historical fat "
+                   "tails and cross-factor dependence; the normal draws "
+                   "understate them — the gap between the two ES99 numbers "
+                   "IS the tail-risk story. Short spread history without a "
+                   "FRED key (~3y) makes the tails optimistic.")
+
 
 # ========================================================= manager oversight
-with tabs[4]:
+with tabs[5]:
     st.caption("*Objective: support asset-manager oversight — evaluation, "
                "monitoring, performance assessment.*")
     st.caption(":blue[● SYNTHETIC] manager returns are simulated (no public "

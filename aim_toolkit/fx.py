@@ -128,3 +128,89 @@ def min_var_hedge_ratio(asset_ret_local: pd.Series, fx_ret: pd.Series,
     cov = asset_ret_local.rolling(window).cov(fx_ret)
     var = fx_ret.rolling(window).var()
     return (cov / var).rename("min_var_hedge_ratio")
+
+
+# ------------------------------------------ 4. GARCH(1,1) + DCC hedging
+def garch11(returns: np.ndarray, n_restarts: int = 2) -> dict:
+    """GARCH(1,1) by Gaussian MLE (from scratch, scipy L-BFGS-B).
+
+    r_t = sqrt(h_t) z_t;  h_t = omega + alpha r_{t-1}^2 + beta h_{t-1}.
+    Returns dict(omega, alpha, beta, cond_vol, loglik)."""
+    from scipy.optimize import minimize
+    r = np.asarray(returns, dtype=float)
+    r = r - r.mean()
+    v = r.var()
+
+    def filt(params):
+        omega, alpha, beta = params
+        h = np.empty(len(r))
+        h[0] = v
+        for t in range(1, len(r)):
+            h[t] = omega + alpha * r[t - 1] ** 2 + beta * h[t - 1]
+        return h
+
+    def nll(params):
+        h = filt(params)
+        if (h <= 0).any():
+            return 1e10
+        return 0.5 * np.sum(np.log(h) + r ** 2 / h)
+
+    best = None
+    for a0, b0 in [(0.05, 0.90), (0.10, 0.80)][:n_restarts]:
+        res = minimize(nll, x0=[v * (1 - a0 - b0), a0, b0],
+                       method="L-BFGS-B",
+                       bounds=[(1e-12, None), (1e-6, 0.5), (1e-6, 0.999)])
+        if best is None or res.fun < best.fun:
+            best = res
+    omega, alpha, beta = best.x
+    return {"omega": omega, "alpha": alpha, "beta": beta,
+            "cond_vol": np.sqrt(filt(best.x)), "loglik": -best.fun}
+
+
+def dcc_hedge_ratio(asset_ret_local: pd.Series, fx_ret: pd.Series) -> dict:
+    """DCC(1,1)-GARCH conditional minimum-variance hedge ratio.
+
+    Two-stage Engle (2002): univariate GARCH(1,1) per series, then DCC
+    on the standardized residuals:
+        Q_t = (1-a-b) Qbar + a e_{t-1} e_{t-1}' + b Q_{t-1}
+    h*_t = rho_t * sigma_asset,t / sigma_fx,t -- the conditional version
+    of Cov/Var. Returns dict(hedge_ratio, rho, a, b, garch_params)."""
+    from scipy.optimize import minimize
+    df = pd.concat([asset_ret_local.rename("a"), fx_ret.rename("f")],
+                   axis=1).dropna()
+    g1 = garch11(df["a"].to_numpy())
+    g2 = garch11(df["f"].to_numpy())
+    e = np.column_stack([
+        (df["a"] - df["a"].mean()).to_numpy() / g1["cond_vol"],
+        (df["f"] - df["f"].mean()).to_numpy() / g2["cond_vol"]])
+    T = len(e)
+    Qbar = e.T @ e / T
+
+    def rho_path(params):
+        a, b = params
+        Q = Qbar.copy()
+        rho = np.empty(T)
+        rho[0] = Qbar[0, 1] / np.sqrt(Qbar[0, 0] * Qbar[1, 1])
+        for t in range(1, T):
+            Q = (1 - a - b) * Qbar + a * np.outer(e[t - 1], e[t - 1]) + b * Q
+            rho[t] = Q[0, 1] / np.sqrt(Q[0, 0] * Q[1, 1])
+        return np.clip(rho, -0.9999, 0.9999)
+
+    def nll(params):
+        a, b = params
+        if a + b >= 0.999:
+            return 1e10
+        rho = rho_path(params)
+        det = 1 - rho ** 2
+        quad = (e[:, 0] ** 2 - 2 * rho * e[:, 0] * e[:, 1]
+                + e[:, 1] ** 2) / det
+        return 0.5 * np.sum(np.log(det) + quad)
+
+    res = minimize(nll, x0=[0.03, 0.94], method="L-BFGS-B",
+                   bounds=[(1e-6, 0.3), (0.5, 0.998)])
+    a, b = res.x
+    rho = pd.Series(rho_path(res.x), index=df.index, name="dcc_rho")
+    hr = pd.Series(rho.to_numpy() * g1["cond_vol"] / g2["cond_vol"],
+                   index=df.index, name="dcc_hedge_ratio")
+    return {"hedge_ratio": hr, "rho": rho, "a": float(a), "b": float(b),
+            "garch_asset": g1, "garch_fx": g2}

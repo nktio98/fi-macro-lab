@@ -119,6 +119,42 @@ def krd_gap(p: Portfolio, liab: LiabilityBook, curve_fn) -> pd.DataFrame:
     return pd.DataFrame(rows).T.rename_axis("tenor")
 
 
+def monte_carlo_pnl(p: Portfolio, factor_moves: pd.DataFrame,
+                    n_sims: int = 10_000, method: str = "bootstrap",
+                    seed: int = 0) -> dict:
+    """Monte Carlo P&L distribution through the same revaluation function
+    the deterministic scenarios use (the promised upgrade path).
+
+    factor_moves: historical per-period factor moves with columns
+      ['rates_bp' (parallel), 'spreads_bp', 'equity_pct', 'fx_pct'].
+    method 'bootstrap' resamples historical rows (keeps fat tails and
+    cross-factor dependence); 'normal' draws from a fitted multivariate
+    normal (understates tails -- shown for comparison).
+
+    Returns dict with the pnl array and VaR/ES at 95/99 (positive = loss).
+    """
+    cols = ["rates_bp", "spreads_bp", "equity_pct", "fx_pct"]
+    F = factor_moves[cols].dropna().to_numpy()
+    rng = np.random.default_rng(seed)
+    if method == "bootstrap":
+        draws = F[rng.integers(0, len(F), n_sims)]
+    elif method == "normal":
+        draws = rng.multivariate_normal(F.mean(0), np.cov(F.T), n_sims)
+    else:
+        raise ValueError(f"unknown method {method!r}")
+    pnl = np.empty(n_sims)
+    for i, (rt, sp, eq, fxm) in enumerate(draws):
+        scen = {"rates": {k: rt for k in p.krd}, "spreads_bp": sp,
+                "equity_pct": eq, "fx_pct": fxm}
+        pnl[i] = asset_pnl(p, scen)["total"]
+    q = np.quantile(pnl, [0.05, 0.01])
+    return {"pnl": pnl, "mean": float(pnl.mean()), "std": float(pnl.std()),
+            "var95": float(-q[0]), "var99": float(-q[1]),
+            "es95": float(-pnl[pnl <= q[0]].mean()),
+            "es99": float(-pnl[pnl <= q[1]].mean()),
+            "prob_loss": float((pnl < 0).mean())}
+
+
 # Illustrative Solvency-II-flavored standalone charges (fractions of exposure)
 DEFAULT_CHARGES = {"equity": 0.39, "spread_per_dur_yr": 0.012, "fx": 0.25}
 DEFAULT_CORR = pd.DataFrame(

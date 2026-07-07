@@ -33,12 +33,16 @@ KRD additivity, entropy-pooling view attainment, BL limits).
 
 ## Modules
 
-### 1. `yield_curve.py` — Dynamic Nelson-Siegel engine
+### 1. `yield_curve.py` — Dynamic Nelson-Siegel engine + AFNS + ACM
 - Cross-sectional NS fit per date (lambda by grid search), VAR(1) factor
   dynamics, h-step curve forecasts. In-sample fit ~2-3bp RMSE.
-- Upgrade path: AFNS yield-adjustment term (Christensen-Diebold-Rudebusch),
-  ACM term-premium decomposition on the same factor panel, shadow-rate
-  extension for near-ZLB markets (JPY, TWD).
+- `AFNSModel`: arbitrage-free yield adjustment (Christensen-Diebold-
+  Rudebusch closed form, two-step approximation) — convexity correction
+  on the long end.
+- `ACMTermPremium`: Adrian-Crump-Moench 3-step regression term premium;
+  decomposes the 10y into expected short rates + term premium (identity
+  tested exactly; pricing RMSE tested < 50bp).
+- Remaining upgrade path: shadow-rate extension for near-ZLB markets.
 
 ### 2. `regimes.py` — Regime detection
 - `GaussianMS`: 2-state Markov-switching (Hamilton filter + EM), from scratch.
@@ -120,7 +124,33 @@ python3 run_demo.py       # console report + charts in outputs/
 - FRED OECD panel: monthly 10y yields for JP/KR/AU/DE/FR/IT/GB/US.
 - All free, no API key; same 24h disk cache.
 
-### 11. `app.py` — Streamlit dashboard (Asia-focused, live data)
+### 11. `nowcast.py` — Macro nowcasting (ID / KR / JP / US)
+- Monthly activity factor via EM-PCA (missing-data tolerant — the core
+  nowcasting trick for ragged publication lags).
+- Bridge regression of quarterly GDP growth on the quarter-averaged
+  factor (Newey-West inference) → current-quarter GDP nowcast.
+- Honest about coverage: free monthly data exists for ID/KR/JP/US;
+  SG/MY/TH have no usable free series (PMI is licensed).
+
+### 12. `macro.py` — Shock transmission (local projections, Jordà 2005)
+- Impulse responses of FX / spreads / equity to a US 10y shock, one OLS
+  per horizon with Newey-West bands. Chosen over sign-restricted SVARs
+  deliberately: same estimand, no identification controversy, auditable.
+
+### 13. `monitoring.py` — Model & signal governance
+- Forecast evaluation (hit rate, RMSE, IC), two-sided CUSUM drift
+  detection on forecast errors, rolling-IR signal-decay reports.
+- Complements `taa.deflated_sharpe` (the inception gate) with the
+  post-deployment leg.
+
+### Also upgraded
+- `fx.py`: from-scratch GARCH(1,1) MLE + DCC(1,1) conditional
+  minimum-variance hedge ratios (tested: recovers persistence and
+  constant correlation on simulated data).
+- `stress.py`: `monte_carlo_pnl` — bootstrap / normal Monte Carlo through
+  the same revaluation function as the named scenarios → VaR/ES 95/99.
+
+### 14. `app.py` — Streamlit dashboard (Asia-focused, live data)
 - Organized around the strategist's three core objectives:
   1. *Economic & capital-market analysis* → *Rates & curves* (Asian curve
      monitor, DNS labs for UST/JGB/euro AAA, global 10y history) and
