@@ -137,13 +137,14 @@ def snap_yield(snap: pd.DataFrame, tenor: float) -> float:
 
 
 # ------------------------------------------------------------------ header
-st.title("AIM Strategist Dashboard — Asia")
-st.caption("Multi-economy rates · FX · regimes · TAA · ALM stress · manager "
-           "oversight — built for regional insurance portfolio strategy")
+st.title("FI Macro Lab")
+st.caption("Fixed income & macro analysis — multi-economy rates · FX · "
+           "regimes · TAA · scenario risk · credit research, on live free "
+           "data with honest signal validation")
 
 tabs = st.tabs(["🌏 Rates & curves", "💱 FX & regimes", "📊 Macro lab",
                 "🎯 Strategy & TAA", "🛡️ Stress & resilience",
-                "🔍 Manager oversight"])
+                "📄 Research", "🔍 Manager oversight"])
 
 us_yields, us_live = get_us_curve()
 dns_us = fit_dns(us_yields)
@@ -900,8 +901,180 @@ with tabs[4]:
                    "FRED key (~3y) makes the tails optimistic.")
 
 
-# ========================================================= manager oversight
+# ================================================================= research
 with tabs[5]:
+    import json as _json
+    from pathlib import Path as _Path
+
+    ART = _Path(__file__).parent / "research_artifacts"
+    st.subheader("Credit Spread Mispricing and Expected Returns in "
+                 "U.S. Corporate Bonds")
+    st.caption("Tiosudarmin (2025) — ~1.9M bond-months, TRACE/FISD + CRSP "
+               "+ Merton distance-to-default, 2002-2020. Monthly "
+               "cross-sectional spread model → residual = mispricing → "
+               "does it predict returns? All numbers below are computed "
+               "by the reproducible pipeline in `research/` (licensed "
+               "micro-data stays private; these are aggregates).")
+
+    mode = st.radio("Issuer-link mode",
+                    ["window (corrected CUSIP→PERMNO links)",
+                     "naive (original merge — replication)"],
+                    horizontal=True)
+    mdir = ART / ("window" if mode.startswith("window") else "naive")
+
+    if not (mdir / "meta.json").exists():
+        st.warning("Artifact bundle not found — run "
+                   "`python -m research.run_paper`.")
+    else:
+        meta = _json.loads((mdir / "meta.json").read_text())
+        seg = pd.read_csv(mdir / "fmb_segments.csv", index_col=0)
+        m = st.columns(5)
+        m[0].metric("IG mispricing slope", f"{seg.loc['IG', 'coef']:.4f}",
+                    help="Fama-MacBeth, next-month returns")
+        m[1].metric("IG t-stat", f"{seg.loc['IG', 't_stat']:.2f}")
+        m[2].metric("HY t-stat", f"{seg.loc['HY', 't_stat']:.2f}",
+                    help="mispricing is NOT priced in high yield")
+        m[3].metric("IG L/S Sharpe",
+                    f"{meta['ls_stats']['ann_sharpe']:.2f}")
+        m[4].metric("Sample", f"{meta['n_obs']:,} obs")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            igq = pd.read_csv(mdir / "ig_quintiles.csv", index_col=0)
+            hyq = pd.read_csv(mdir / "hy_quintiles.csv", index_col=0)
+            qbar = pd.DataFrame({
+                "IG": igq.mean() * 100, "HY": hyq.mean() * 100})
+            fig, ax = plt.subplots(figsize=(6, 3.4))
+            qbar.plot(kind="bar", ax=ax, color=["#4477AA", "#EE6677"])
+            ax.set_ylabel("avg next-month return (%)")
+            ax.set_title("Mispricing quintiles: Q0 rich → Q4 cheap")
+            plt.xticks(rotation=0)
+            st.pyplot(fig, clear_figure=True)
+            st.caption("Monotone in IG (cheap beats rich); flat-to-noisy "
+                       "in HY — the segmented-efficiency headline.")
+        with col2:
+            ls = pd.read_csv(mdir / "ls_returns.csv", index_col=0,
+                             parse_dates=True).iloc[:, 0]
+            st.line_chart((1 + ls).cumprod(), height=280)
+            st.caption(f"IG cheap-minus-rich long-short, growth of $1. "
+                       f"Mean {meta['ls_stats']['mean_monthly'] * 100:.2f}%"
+                       f"/m, t={meta['ls_stats']['t_stat']:.2f}, "
+                       f"Sharpe {meta['ls_stats']['ann_sharpe']:.2f} "
+                       "(gross of costs).")
+
+        with st.expander("Robustness: factor spanning, ΔDD horizons, "
+                         "and the link-fix comparison"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write("**3-factor regression of the L/S (NW t)**")
+                st.dataframe(pd.read_csv(mdir / "three_factor.csv",
+                                         index_col=0).round(4))
+                st.caption("Portfolio alphas ≈ 0: the premium is spanned "
+                           "by IG market, credit and term factors...")
+                st.write("**Two-pass FMB (betas + characteristic)**")
+                st.dataframe(pd.read_csv(mdir / "two_pass.csv",
+                                         index_col=0).round(4))
+                st.caption("...yet the CHARACTERISTIC stays priced at the "
+                           "bond level — beta measurement error at work.")
+            with c2:
+                st.write("**Mispricing + ΔDD by horizon**")
+                st.dataframe(pd.read_csv(mdir / "dd_horizons.csv",
+                                         index_col=0).round(4))
+                both = {}
+                for md in ("naive", "window"):
+                    f = ART / md / "fmb_segments.csv"
+                    j = ART / md / "meta.json"
+                    if f.exists():
+                        s = pd.read_csv(f, index_col=0)
+                        mt = _json.loads(j.read_text())
+                        both[md] = {"IG coef": s.loc["IG", "coef"],
+                                    "IG t": s.loc["IG", "t_stat"],
+                                    "obs": mt["n_obs"]}
+                if len(both) == 2:
+                    st.write("**Link-window fix: before vs after**")
+                    st.dataframe(pd.DataFrame(both).T.round(4))
+                    st.caption("Correcting CUSIP→PERMNO validity windows "
+                               "removes ~11% of bond-months (duplicates + "
+                               "wrong-issuer links); the IG premium is "
+                               "unchanged — a robustness result found by "
+                               "refactoring the pipeline.")
+
+        ext = mdir / "extensions"
+        if (ext / "decay_profile.csv").exists():
+            st.subheader("Extensions")
+            e1, e2 = st.columns(2)
+            with e1:
+                dec = pd.read_csv(ext / "decay_profile.csv", index_col=0)
+                fig, ax = plt.subplots(figsize=(6, 3.2))
+                ax.plot(dec.index, dec["coef_cum"], "o-", color="#4477AA",
+                        label="cumulative slope")
+                ax.bar(dec.index, dec["marginal"], alpha=0.3,
+                       color="#EE6677", label="marginal month")
+                ax.set_xlabel("months after signal")
+                ax.set_ylabel("return per unit residual")
+                ax.legend(); ax.grid(alpha=0.3)
+                ax.set_title("How fast does mispricing pay off?")
+                st.pyplot(fig, clear_figure=True)
+                st.caption("Cumulative FMB slopes at h=1..12 (Newey-West "
+                           "t's in the artifact). Where the marginal bars "
+                           "die out is the signal's useful horizon.")
+            with e2:
+                if (ext / "liquidity_double_sort.csv").exists():
+                    st.write("**Premium by liquidity tercile "
+                             "(dollar volume)**")
+                    st.dataframe(pd.read_csv(
+                        ext / "liquidity_double_sort.csv",
+                        index_col=0).round(4))
+                if (ext / "turnover.json").exists():
+                    tj = _json.loads((ext / "turnover.json").read_text())
+                    t1, t2 = st.columns(2)
+                    t1.metric("One-way turnover",
+                              f"{tj['one_way_turnover']:.0%}/m")
+                    t2.metric("Break-even cost",
+                              f"{tj['breakeven_cost_bp']:.0f} bp")
+                    st.caption("Break-even one-way transaction cost that "
+                               "erases the L/S mean — compare with "
+                               "realistic IG trading costs.")
+                if (ext / "regime_conditional.csv").exists():
+                    st.write("**FMB slope by credit-market regime**")
+                    st.dataframe(pd.read_csv(
+                        ext / "regime_conditional.csv",
+                        index_col=0).round(4))
+
+        with st.expander("Interactive methodology demo (synthetic data — "
+                         "see the pipeline find a planted premium)"):
+            prem = st.slider("Planted IG mispricing premium",
+                             0.0, 0.15, 0.08, 0.01)
+
+            @st.cache_data(show_spinner="Simulating panel + running "
+                                        "pipeline...")
+            def demo(premium: float):
+                from research.fmb import fmb_by_segment
+                from research.signals import spread_residuals
+                from research.synth import synth_panel
+                pnl = synth_panel(T=48, n_bonds=200, mis_premium=premium,
+                                  seed=1)
+                sig = spread_residuals(pnl)
+                return fmb_by_segment(sig["panel"])
+            res = demo(prem)
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Planted premium", f"{prem:.2f}")
+            d2.metric("Pipeline estimate (IG)",
+                      f"{res.loc['IG', 'coef']:.3f}",
+                      delta=f"t={res.loc['IG', 't_stat']:.1f}")
+            d3.metric("HY (nothing planted)",
+                      f"{res.loc['HY', 'coef']:.3f}",
+                      delta=f"t={res.loc['HY', 't_stat']:.1f}",
+                      delta_color="off")
+            st.caption("The exact production code (research/signals, "
+                       "research/fmb) runs here on a simulated panel: it "
+                       "recovers whatever premium you plant in IG and "
+                       "finds nothing in HY where nothing exists — the "
+                       "validation logic behind the paper's tests.")
+
+
+# ========================================================= manager oversight
+with tabs[6]:
     st.caption("*Objective: support asset-manager oversight — evaluation, "
                "monitoring, performance assessment.*")
     st.caption(":blue[● SYNTHETIC] manager returns are simulated (no public "

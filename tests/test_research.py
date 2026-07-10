@@ -4,54 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from research.extensions import decay_profile, liquidity_double_sort, \
+    regime_conditional_fmb, strategy_turnover
 from research.fmb import fama_macbeth, fmb_by_segment, fmb_interaction
 from research.panel import link_bonds
 from research.portfolios import build_factors, long_short_stats, \
     nw_regression, quintile_returns, two_pass_fmb
 from research.signals import add_dd_changes, spread_residuals
+from research.synth import synth_panel
 
 rng = np.random.default_rng(9)
-
-
-# ------------------------------------------------------- synthetic panel
-def synth_panel(T=90, n_bonds=300, mis_premium=0.08, seed=9):
-    """Bond-month panel with a PLANTED mispricing premium: spreads are a
-    known function of fundamentals plus a persistent bond-level pricing
-    error; next-month returns load on that error with slope
-    `mis_premium` (IG only)."""
-    r = np.random.default_rng(seed)
-    dates = pd.date_range("2005-01-31", periods=T, freq="ME")
-    ids = np.arange(n_bonds)
-    dd = r.normal(7, 2, n_bonds)
-    size = r.uniform(4, 9, n_bonds)
-    dur = r.uniform(1, 12, n_bonds)
-    tmt = np.clip(dur * r.uniform(1.0, 1.6, n_bonds), 0.5, 40)
-    rating = r.choice(["AAA", "AA", "A", "BBB", "BB", "B"], n_bonds,
-                      p=[0.05, 0.15, 0.3, 0.3, 0.12, 0.08])
-    is_hy = np.isin(rating, ["BB", "B"])
-    mis = r.normal(0, 0.005, (T, n_bonds))          # pricing error (pp)
-    rows = []
-    for t in range(T):
-        spread = (0.02 - 0.001 * dd - 0.002 * size + 0.0005 * dur
-                  + 0.004 * is_hy + mis[t])
-        ret_next = (0.003
-                    + mis_premium * mis[t] * (~is_hy)
-                    + r.normal(0, 0.006, n_bonds))
-        for i in ids:
-            rows.append({
-                "ISSUE_ID": i, "DATE": dates[t], "PERMNO": 1000 + i,
-                "T_Spread": spread[i], "RET_EOM": 0.0,
-                "RET_EOM_next": ret_next[i],
-                "DDCamp": dd[i] + r.normal(0, 0.05),
-                "log_size": size[i], "DURATION": dur[i],
-                "AMOUNT_OUTSTANDING": np.exp(size[i]),
-                "TMT": tmt[i],
-                "TMT_bucket": pd.cut([tmt[i]], bins=[0, 3, 7, 15, 100],
-                                     labels=["0-3y", "3-7y", "7-15y",
-                                             ">15y"])[0],
-                "RATING_CAT": rating[i],
-                "RATING_CLASS": "1.HY" if is_hy[i] else "0.IG"})
-    return pd.DataFrame(rows)
 
 
 @pytest.fixture(scope="module")
@@ -166,6 +128,45 @@ def test_two_pass_prices_mispricing(planted):
     out = two_pass_fmb(p, fac, min_months=24)
     s = out["summary"]
     assert s.loc["spread_resid_w", "t_stat"] > 2     # planted premium
+
+# -------------------------------------------------------------- extensions
+def test_decay_profile_grows_with_persistent_mispricing(planted):
+    _, sig = planted
+    dec = decay_profile(sig["panel"], horizons=(1, 3, 6))
+    # h=1 slope = planted premium
+    assert dec.loc[1, "coef_cum"] == pytest.approx(0.08, abs=0.03)
+    # AR(1) errors (phi=0.7) keep paying: cumulative slope grows with h
+    assert dec.loc[3, "coef_cum"] > dec.loc[1, "coef_cum"]
+    assert dec.loc[6, "coef_cum"] > dec.loc[3, "coef_cum"]
+    # ...at a decaying marginal rate
+    assert dec.loc[6, "marginal"] < dec.loc[3, "marginal"]
+    assert dec.loc[1, "t_nw"] > 3
+    assert (dec["n_months"] > 40).all()
+
+
+def test_liquidity_double_sort_runs_and_finds_premium_everywhere(planted):
+    # premium planted independent of liquidity -> all buckets significant
+    _, sig = planted
+    liq = liquidity_double_sort(sig["panel"])
+    assert {"low_liq", "high_liq"} <= set(liq.index)
+    assert (liq["fmb_t"] > 2).all()
+
+
+def test_strategy_turnover_bounds(planted):
+    _, sig = planted
+    t = strategy_turnover(sig["panel"])
+    assert 0 < t["one_way_turnover"] <= 1
+    assert t["mean_monthly_ls"] > 0
+    assert t["breakeven_cost_bp"] > 0
+
+
+def test_regime_conditional_fmb_shapes(planted):
+    _, sig = planted
+    out = regime_conditional_fmb(sig["panel"], jump_penalty=5.0)
+    assert 0 <= out["stress_share"] <= 1
+    assert len(out["table"]) >= 1
+    assert out["table"]["coef"].notna().all()
+
 
 # ------------------------------------------------------------- DD changes
 def test_add_dd_changes_horizons():
