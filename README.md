@@ -25,7 +25,29 @@ tests on a ~1.9M bond-month TRACE-FISD panel (2002-2020).
   (`tests/test_research.py`); the licensed WRDS inputs are gitignored
   and never enter tests or the public artifact bundle.
 - `python -m research.run_paper` reproduces the paper and writes
-  public-safe aggregate artifacts to `research_artifacts/`.
+  public-safe aggregate artifacts to `research_artifacts/`;
+  `python -m research.run_extensions` adds four extensions:
+  - **decay profile** (h=1..12 with overlap-corrected NW t-stats),
+  - **liquidity double-sort + turnover/break-even cost** (61%/m
+    one-way turnover → 7.9bp break-even: gross premium dies at
+    realistic IG costs),
+  - **regime-conditional pricing** (slope 0.57 t=3.7 in stress months
+    vs 0.04 calm — a crisis/liquidity-provision premium),
+  - **downgrade mechanism** (residual strongly predicts downgrades,
+    t up to 17, yet excluding downgraded bonds STRENGTHENS the return
+    premium to 0.089 t=3.5 — downgrades mask, not make, the effect).
+
+## The app: six desk-style tabs
+
+**Macro** (nowcast, shock transmission, regimes) · **Rates**
+(multi-economy curves, state-space labs, term premium, cross-market
+pickup) · **Credit** (IG/HY OAS monitor + stress regimes) · **FX**
+(monitor, ECM fair value, DCC hedging) · **Scenarios & risk** (stress,
+geopolitical library, MC/BVAR VaR, entropy-pooling allocation) ·
+**Research & signals** (the paper's artifacts + interactive demo +
+the signal-governance lifecycle: purged CV/DSR, BH-FDR + luck-vs-skill
+battery, decay monitoring). The manager-oversight demo was retired;
+its multiple-testing machinery now screens trading signals instead.
 
 ## Toolkit modules
 

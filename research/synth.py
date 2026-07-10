@@ -15,8 +15,16 @@ import numpy as np
 import pandas as pd
 
 
+RATING_NUM_MAP = {"AAA": 1, "AA": 4, "A": 6, "BBB": 9, "BB": 12, "B": 15}
+
+
 def synth_panel(T: int = 90, n_bonds: int = 300, mis_premium: float = 0.08,
-                phi: float = 0.7, seed: int = 9) -> pd.DataFrame:
+                phi: float = 0.7, downgrade_link: float = 0.0,
+                seed: int = 9) -> pd.DataFrame:
+    """downgrade_link > 0 plants an INFORMATION story: cheap bonds
+    (positive pricing error) become more likely to be downgraded --
+    the alternative hypothesis the downgrade-mechanism test must
+    distinguish from pure mispricing (link = 0)."""
     r = np.random.default_rng(seed)
     dates = pd.date_range("2005-01-31", periods=T, freq="ME")
     dd = r.normal(7, 2, n_bonds)
@@ -40,6 +48,14 @@ def synth_panel(T: int = 90, n_bonds: int = 300, mis_premium: float = 0.08,
     for t in range(T):
         R_next[t] = (0.003 + mis_premium * mis[t] * (~is_hy)
                      + r.normal(0, 0.006, n_bonds))
+    # rating paths: baseline 1% monthly downgrade hazard, optionally
+    # increasing in current cheapness (information story)
+    rnum = np.empty((T, n_bonds))
+    rnum[0] = np.array([RATING_NUM_MAP[c] for c in rating], dtype=float)
+    for t in range(1, T):
+        p_dg = 0.01 + downgrade_link * 40.0 * np.clip(mis[t - 1], 0, None)
+        dg = r.uniform(size=n_bonds) < np.clip(p_dg, 0, 0.9)
+        rnum[t] = np.minimum(rnum[t - 1] + dg, 22)
     rows = []
     for t in range(T):
         spread = (0.02 - 0.001 * dd - 0.002 * size + 0.0005 * dur
@@ -56,5 +72,6 @@ def synth_panel(T: int = 90, n_bonds: int = 300, mis_premium: float = 0.08,
                 "TMT": tmt[i], "TMT_bucket": tmt_lab[i],
                 "T_DVolume": dvol[i] * r.uniform(0.5, 1.5),
                 "RATING_CAT": rating[i],
+                "RATING_NUM": rnum[t, i],
                 "RATING_CLASS": "1.HY" if is_hy[i] else "0.IG"})
     return pd.DataFrame(rows)

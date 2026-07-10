@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.extensions import decay_profile, liquidity_double_sort, \
-    regime_conditional_fmb, strategy_turnover
+from research.extensions import decay_profile, downgrade_mechanism, \
+    liquidity_double_sort, regime_conditional_fmb, strategy_turnover
 from research.fmb import fama_macbeth, fmb_by_segment, fmb_interaction
 from research.panel import link_bonds
 from research.portfolios import build_factors, long_short_stats, \
@@ -166,6 +166,27 @@ def test_regime_conditional_fmb_shapes(planted):
     assert 0 <= out["stress_share"] <= 1
     assert len(out["table"]) >= 1
     assert out["table"]["coef"].notna().all()
+
+
+def test_downgrade_mechanism_detects_planted_information():
+    # cheap bonds made MORE likely to be downgraded -> info test fires
+    panel = synth_panel(T=60, n_bonds=250, downgrade_link=1.0, seed=21)
+    sig = spread_residuals(panel)
+    out = downgrade_mechanism(sig["panel"], horizons=(1, 3))
+    assert out["info"].loc[1, "coef"] > 0
+    assert out["info"].loc[1, "t_stat"] > 2.5
+
+
+def test_downgrade_mechanism_quiet_under_pure_mispricing(planted):
+    # baseline synth has NO resid->downgrade link -> info test silent,
+    # and the return premium survives excluding downgraded bonds
+    _, sig = planted
+    out = downgrade_mechanism(sig["panel"], horizons=(1,))
+    assert abs(out["info"].loc[1, "t_stat"]) < 2
+    d = out["return_decomp"]
+    assert d.loc["excl. downgraded next month", "t_stat"] > 3
+    assert d.loc["excl. downgraded next month", "coef"] == pytest.approx(
+        d.loc["baseline (dg sample)", "coef"], abs=0.02)
 
 
 # ------------------------------------------------------------- DD changes

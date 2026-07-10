@@ -1,14 +1,22 @@
 """
-AIM Strategist Dashboard -- Asia-focused, multi-economy.
+FI Macro Lab -- fixed-income & macro analysis, desk-style.
 
-Designed around three responsibilities of a regional investment strategist:
-  1. Economic & capital-market analysis (rates, FX, macro drivers,
-     regime shifts)          -> tabs "Rates & curves", "FX & regimes"
-  2. Translate macro views into actionable TAA proposals
-                             -> tab  "Strategy & TAA"
-  3. Forward-looking scenario analysis & stress testing (rates, spreads,
-     FX, geopolitical)       -> tab  "Stress & resilience"
-plus asset-manager oversight -> tab  "Manager oversight".
+Six tabs, one through-line (fit a fair-value model, treat the residual
+as the signal, validate honestly):
+
+  Macro              nowcasts, local-projection shock transmission,
+                     regime detection
+  Rates              multi-economy curves (incl. Indonesia/ASEAN+3),
+                     DNS/Kalman/shadow-rate labs, ACM term premium,
+                     cross-market hedged pickup
+  Credit             US IG/HY spread monitor + credit stress regimes
+  FX                 Asian FX monitor, ECM fair value, DCC hedge ratios
+  Scenarios & risk   ALM-style stress, geopolitical scenario library,
+                     Monte Carlo / BVAR VaR, entropy-pooling allocation
+  Research & signals corporate-bond mispricing paper (real artifacts +
+                     interactive methodology demo) and the signal-
+                     governance lifecycle (purged CV/DSR, BH-FDR +
+                     luck-vs-skill battery, decay monitoring)
 
 Data: AsianBondsOnline (ASEAN+3 LCY curves incl. Indonesia & Singapore),
 Japan MoF (full JGB history), ECB (euro AAA curve, IDR/INR/TWD FX),
@@ -142,16 +150,15 @@ st.caption("Fixed income & macro analysis — multi-economy rates · FX · "
            "regimes · TAA · scenario risk · credit research, on live free "
            "data with honest signal validation")
 
-tabs = st.tabs(["🌏 Rates & curves", "💱 FX & regimes", "📊 Macro lab",
-                "🎯 Strategy & TAA", "🛡️ Stress & resilience",
-                "📄 Research", "🔍 Manager oversight"])
+tabs = st.tabs(["📊 Macro", "🌏 Rates", "💳 Credit", "💱 FX",
+                "🛡️ Scenarios & risk", "📄 Research & signals"])
 
 us_yields, us_live = get_us_curve()
 dns_us = fit_dns(us_yields)
 
 
-# =========================================================== rates & curves
-with tabs[0]:
+# ==================================================================== rates
+with tabs[1]:
     st.caption("*Objective: economic & capital-market analysis — interest "
                "rates: trends, curve shapes, and cross-market comparison.*")
 
@@ -313,8 +320,8 @@ with tabs[0]:
         st.info("ACM needs the live US panel.")
 
 
-# ============================================================ fx & regimes
-with tabs[1]:
+# ======================================================================= fx
+with tabs[3]:
     st.caption("*Objective: economic & capital-market analysis — FX and "
                "macro drivers: trends, regime shifts, valuation signals.*")
 
@@ -346,46 +353,6 @@ with tabs[1]:
             st.dataframe(tbl)
             st.caption("Positive YTD % = depreciation vs USD, i.e. an "
                        "unhedged USD asset gained in local terms.")
-
-    st.divider()
-    st.subheader("Regime detection")
-    mkt, mkt_live = get_market()
-    assets = {"S&P 500 (global risk)": None}
-    if fxr is not None:
-        for c in fxr.columns:
-            assets[f"USD/{c}"] = c
-    pick = st.selectbox("Series", list(assets))
-    pen = st.slider("Jump penalty (persistence)", 5.0, 300.0, 80.0, 5.0)
-    if assets[pick] is None:
-        ret = mkt["equity_ret"]
-        feat = np.column_stack([
-            ret.rolling(10).std().bfill(),
-            ret.rolling(10).mean().bfill(),
-            mkt["credit_spread_bp"].diff().rolling(10).mean().bfill()])
-    else:
-        ret = fxr[assets[pick]].pct_change().dropna().iloc[-2520:]
-        feat = np.column_stack([ret.rolling(10).std().bfill(),
-                                ret.rolling(10).mean().bfill()])
-    jm = JumpModel(jump_penalty=pen).fit(feat)
-    ms = GaussianMS().fit(ret.to_numpy())
-    ms_states = (ms.smoothed[:, 1] > 0.5).astype(int)
-    fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
-    cum = (1 + ret).cumprod()
-    for a, s_, name in [(axes[0], jm.states, f"Jump model (penalty {pen:.0f})"),
-                        (axes[1], ms_states, "2-state Markov-switching")]:
-        a.plot(ret.index, cum, "k", lw=0.8)
-        a.fill_between(ret.index, cum.min(), cum.max(), where=s_ == 1,
-                       alpha=0.25, color="red")
-        a.set_title(f"{name} — shaded = stress/volatile regime")
-    st.pyplot(fig, clear_figure=True)
-    col1, col2 = st.columns(2)
-    col1.dataframe(regime_summary(jm.states, ret))
-    col2.dataframe(pd.DataFrame({
-        "switches": [(np.diff(jm.states) != 0).sum(),
-                     (np.diff(ms_states) != 0).sum()],
-        "stress freq %": [round(jm.states.mean() * 100, 1),
-                          round(ms_states.mean() * 100, 1)]},
-        index=["Jump model", "MS-HMM"]))
 
     st.divider()
     st.subheader("FX fair value — Engle-Granger ECM (BEER-lite)")
@@ -456,8 +423,8 @@ with tabs[1]:
                    "return) on the table.")
 
 
-# ============================================================== macro lab
-with tabs[2]:
+# ==================================================================== macro
+with tabs[0]:
     st.caption("*Objective: economic analysis — where is the economy right "
                "now, and how do macro shocks transmit into markets?*")
 
@@ -549,13 +516,49 @@ with tabs[2]:
                    "spreads are involved (free BAML data ≈ 3y without a "
                    "FRED key) — bands widen accordingly.")
 
+    st.divider()
+    st.subheader("Regime detection")
+    assets = {"S&P 500 (global risk)": None}
+    if fxx is not None:
+        for c in fxx.columns:
+            assets[f"USD/{c}"] = c
+    pick = st.selectbox("Series", list(assets))
+    pen = st.slider("Jump penalty (persistence)", 5.0, 300.0, 80.0, 5.0)
+    if assets[pick] is None:
+        ret = fxr_m["equity_ret"]
+        feat = np.column_stack([
+            ret.rolling(10).std().bfill(),
+            ret.rolling(10).mean().bfill(),
+            fxr_m["credit_spread_bp"].diff().rolling(10).mean().bfill()])
+    else:
+        ret = fxx[assets[pick]].pct_change().dropna().iloc[-2520:]
+        feat = np.column_stack([ret.rolling(10).std().bfill(),
+                                ret.rolling(10).mean().bfill()])
+    jm = JumpModel(jump_penalty=pen).fit(feat)
+    ms = GaussianMS().fit(ret.to_numpy())
+    ms_states = (ms.smoothed[:, 1] > 0.5).astype(int)
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+    cum = (1 + ret).cumprod()
+    for a, s_, name in [(axes[0], jm.states, f"Jump model (penalty {pen:.0f})"),
+                        (axes[1], ms_states, "2-state Markov-switching")]:
+        a.plot(ret.index, cum, "k", lw=0.8)
+        a.fill_between(ret.index, cum.min(), cum.max(), where=s_ == 1,
+                       alpha=0.25, color="red")
+        a.set_title(f"{name} — shaded = stress/volatile regime")
+    st.pyplot(fig, clear_figure=True)
+    col1, col2 = st.columns(2)
+    col1.dataframe(regime_summary(jm.states, ret))
+    col2.dataframe(pd.DataFrame({
+        "switches": [(np.diff(jm.states) != 0).sum(),
+                     (np.diff(ms_states) != 0).sum()],
+        "stress freq %": [round(jm.states.mean() * 100, 1),
+                          round(ms_states.mean() * 100, 1)]},
+        index=["Jump model", "MS-HMM"]))
 
-# ========================================================== strategy & TAA
-with tabs[3]:
-    st.caption("*Objective: translate macro views, market developments and "
-               "valuation signals into actionable TAA — consistent with "
-               "objectives and constraints.*")
 
+# ============================================= rates (cont.): cross-market RV
+with tabs[1]:
+    st.divider()
     st.subheader("Cross-market hedged yield pickup (live curves)")
     asia, _ = get_asia_curves()
     mkt_, _ = get_market()
@@ -601,111 +604,7 @@ with tabs[3]:
         st.warning("Needs live US curve + ABO curves; using the FX tab "
                    "editable table instead.")
 
-    st.divider()
-    st.subheader("TAA signal lab — momentum with honest validation")
-    eq, eq_live = get_equity()
-    live_badge(eq_live, "S&P 500 (global risk proxy)")
-    prices = eq["SP500"].dropna()
-    asset_ret = prices.pct_change().dropna()
-    prices = prices.loc[asset_ret.index]
-
-    def make_position(inputs, lookback, skip):
-        sig = taa.momentum(inputs["prices"], lookback=lookback, skip=skip)
-        return taa.zscore_position(sig).fillna(0.0)
-
-    grid = [{"lookback": lb, "skip": sk}
-            for lb in (63, 126, 252) for sk in (5, 21)]
-    cv = taa.PurgedKFold(n_splits=5, label_horizon=21, embargo_pct=0.02)
-    with st.spinner("Running purged CV..."):
-        res, sel = taa.cv_sharpes(make_position, grid, {"prices": prices},
-                                  asset_ret, cv)
-    col1, col2 = st.columns(2)
-    col1.dataframe(res.sort_values("test_sharpe_mean", ascending=False))
-    with col2:
-        st.dataframe(sel)
-        st.metric("OOS Sharpe of selection", f"{sel['oos_sharpe'].mean():.2f}")
-    best = res.sort_values("test_sharpe_mean", ascending=False).iloc[0]
-    pos = make_position({"prices": prices}, int(best["lookback"]),
-                        int(best["skip"]))
-    net = taa.backtest(pos, asset_ret)["net"]
-    grid_srs = np.array([taa.sharpe(taa.backtest(
-        make_position({"prices": prices}, g["lookback"], g["skip"]),
-        asset_ret)["net"]) for g in grid]) / np.sqrt(taa.ANN)
-    dsr = taa.deflated_sharpe(net, n_trials=len(grid),
-                              trial_sr_var=float(grid_srs.var()))
-    m = st.columns(3)
-    m[0].metric("Best net Sharpe", f"{taa.sharpe(net):.2f}")
-    m[1].metric("Probabilistic Sharpe", f"{taa.probabilistic_sharpe(net):.0%}")
-    m[2].metric(f"Deflated Sharpe ({len(grid)} trials)", f"{dsr:.0%}")
-    st.info("Verdict: " + ("✅ survives multiple-testing correction"
-                           if dsr > 0.95 else
-                           "⚠️ NOT proven — likely selection bias; do not "
-                           "deploy on this evidence"))
-
-    st.divider()
-    st.subheader("Signal governance — post-deployment decay monitor")
-    rep = monitoring.decay_report(net.dropna(), window=252)
-    g1, g2, g3, g4 = st.columns(4)
-    g1.metric("Full-sample IR", f"{rep['full_ir']:.2f}")
-    g2.metric("Recent IR (1y)", f"{rep['recent_ir']:.2f}")
-    g3.metric("IR trend /yr", f"{rep['ir_trend_per_year']:+.2f}")
-    g4.metric("Verdict", rep["verdict"])
-    ir_series = monitoring.rolling_ir(net.dropna(), window=252).dropna()
-    if len(ir_series):
-        st.line_chart(ir_series, height=220)
-    st.caption("The deflated Sharpe above is the gate at INCEPTION; this "
-               "is the ongoing leg — rolling IR of the deployed signal. "
-               "'DECAYING' (negative recent IR + negative trend) means "
-               "retire or re-estimate, regardless of how good the "
-               "original backtest was.")
-
-    st.divider()
-    st.subheader("View-conditioned allocation (entropy pooling)")
-    mkt2, mkt_live2 = get_market()
-    y10s = us_yields[10.0].resample("ME").last() \
-        if 10.0 in us_yields.columns else None
-    if y10s is not None:
-        eq_m = (1 + mkt2["equity_ret"]).resample("ME").prod() - 1
-        oas = mkt2["credit_spread_bp"].resample("ME").last()
-        dy = y10s.diff().reindex(eq_m.index)
-        govt_m = (y10s.reindex(eq_m.index) / 12 - 8.0 * dy) / 100
-        cred_m = govt_m + (oas.reindex(eq_m.index) / 12
-                           - 5.5 * oas.diff().reindex(eq_m.index)) / 1e4
-        hist = pd.DataFrame({"govt": govt_m, "credit": cred_m,
-                             "equity": eq_m}).dropna()
-        rng = np.random.default_rng(5)
-        scen = hist.to_numpy()[rng.integers(0, len(hist), 1000)]
-        view_eq = st.slider("View: expected EQUITY return (% p.a.)",
-                            -10.0, 15.0, 4.0, 0.5) / 100 / 12
-        view_cr = st.slider("View: expected CREDIT return (% p.a.)",
-                            -5.0, 10.0, 4.5, 0.5) / 100 / 12
-        ep = al.EntropyPooling().fit(
-            scen, np.vstack([al.view_on_mean(scen, 2),
-                             al.view_on_mean(scen, 1)]),
-            [view_eq, view_cr])
-        mu_post, Sigma_post = ep.posterior_moments()
-        ra = st.slider("Risk aversion", 1.0, 10.0, 4.0, 0.5)
-        w = al.mv_optimize(mu_post, Sigma_post, risk_aversion=ra, w_max=0.7)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.dataframe(pd.DataFrame(
-                {"E[r] % p.a.": np.round(mu_post * 12 * 100, 2),
-                 "vol % p.a.": np.round(np.sqrt(np.diag(Sigma_post) * 12)
-                                        * 100, 2),
-                 "weight": np.round(w, 3)}, index=hist.columns))
-            st.metric("Effective scenarios (ENS)",
-                      f"{ep.effective_n:,.0f} / 1,000")
-        with col2:
-            fig, ax = plt.subplots(figsize=(6, 3.2))
-            ax.bar(hist.columns, w, color=["#4477AA", "#EE6677", "#228833"])
-            ax.set_ylabel("weight")
-            ax.set_title("View-conditioned allocation")
-            st.pyplot(fig, clear_figure=True)
-            st.caption("Low ENS = the view is fighting the data — treat "
-                       "the output weights with suspicion.")
-
-
-# ====================================================== stress & resilience
+# ========================================================= scenarios & risk
 with tabs[4]:
     st.caption("*Objective: forward-looking scenario analysis & stress "
                "testing across rates, spreads, FX and geopolitical risk — "
@@ -900,6 +799,51 @@ with tabs[4]:
                    "IS the tail-risk story. Short spread history without a "
                    "FRED key (~3y) makes the tails optimistic.")
 
+    st.divider()
+    st.subheader("View-conditioned allocation (entropy pooling)")
+    mkt2, mkt_live2 = get_market()
+    y10s = us_yields[10.0].resample("ME").last() \
+        if 10.0 in us_yields.columns else None
+    if y10s is not None:
+        eq_m = (1 + mkt2["equity_ret"]).resample("ME").prod() - 1
+        oas = mkt2["credit_spread_bp"].resample("ME").last()
+        dy = y10s.diff().reindex(eq_m.index)
+        govt_m = (y10s.reindex(eq_m.index) / 12 - 8.0 * dy) / 100
+        cred_m = govt_m + (oas.reindex(eq_m.index) / 12
+                           - 5.5 * oas.diff().reindex(eq_m.index)) / 1e4
+        hist = pd.DataFrame({"govt": govt_m, "credit": cred_m,
+                             "equity": eq_m}).dropna()
+        rng = np.random.default_rng(5)
+        scen = hist.to_numpy()[rng.integers(0, len(hist), 1000)]
+        view_eq = st.slider("View: expected EQUITY return (% p.a.)",
+                            -10.0, 15.0, 4.0, 0.5) / 100 / 12
+        view_cr = st.slider("View: expected CREDIT return (% p.a.)",
+                            -5.0, 10.0, 4.5, 0.5) / 100 / 12
+        ep = al.EntropyPooling().fit(
+            scen, np.vstack([al.view_on_mean(scen, 2),
+                             al.view_on_mean(scen, 1)]),
+            [view_eq, view_cr])
+        mu_post, Sigma_post = ep.posterior_moments()
+        ra = st.slider("Risk aversion", 1.0, 10.0, 4.0, 0.5)
+        w = al.mv_optimize(mu_post, Sigma_post, risk_aversion=ra, w_max=0.7)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.dataframe(pd.DataFrame(
+                {"E[r] % p.a.": np.round(mu_post * 12 * 100, 2),
+                 "vol % p.a.": np.round(np.sqrt(np.diag(Sigma_post) * 12)
+                                        * 100, 2),
+                 "weight": np.round(w, 3)}, index=hist.columns))
+            st.metric("Effective scenarios (ENS)",
+                      f"{ep.effective_n:,.0f} / 1,000")
+        with col2:
+            fig, ax = plt.subplots(figsize=(6, 3.2))
+            ax.bar(hist.columns, w, color=["#4477AA", "#EE6677", "#228833"])
+            ax.set_ylabel("weight")
+            ax.set_title("View-conditioned allocation")
+            st.pyplot(fig, clear_figure=True)
+            st.caption("Low ENS = the view is fighting the data — treat "
+                       "the output weights with suspicion.")
+
 
 # ================================================================= research
 with tabs[5]:
@@ -1073,76 +1017,164 @@ with tabs[5]:
                        "validation logic behind the paper's tests.")
 
 
-# ========================================================= manager oversight
-with tabs[6]:
-    st.caption("*Objective: support asset-manager oversight — evaluation, "
-               "monitoring, performance assessment.*")
-    st.caption(":blue[● SYNTHETIC] manager returns are simulated (no public "
-               "manager data); the estimation machinery is real")
-    rng = np.random.default_rng(11)
-    T, n_mgr = 120, 20
-    fac = pd.DataFrame(rng.normal(0.004, 0.03, (T, 2)),
-                       columns=["mkt", "credit"],
-                       index=pd.date_range("2016-01-31", periods=T,
-                                           freq="ME"))
-    true_alpha = np.zeros(n_mgr); true_alpha[[3, 11]] = 0.0025
-    rows, rets = [], {}
-    for i in range(n_mgr):
-        b = rng.uniform(0.6, 1.1), rng.uniform(0.0, 0.5)
-        r = true_alpha[i] + b[0] * fac["mkt"] + b[1] * fac["credit"] \
-            + rng.normal(0, 0.008, T)
-        rets[f"mgr_{i:02d}"] = r
-        out = managers.factor_regression(r, fac)
-        out["pval"] = managers.alpha_pvalue_from_t(out["alpha_t"], T - 3)
-        rows.append({"manager": f"mgr_{i:02d}",
-                     "alpha_ann_%": round(out["alpha_ann_%"], 2),
-                     "alpha_t": round(out["alpha_t"], 2),
-                     "pval": round(out["pval"], 4),
-                     "r2": round(out["r2"], 2)})
-    panel = pd.DataFrame(rows).set_index("manager")
-    bh = managers.benjamini_hochberg(panel["pval"], fdr=0.10)
-    panel["BH significant (FDR 10%)"] = bh["significant_at_FDR"]
-    col1, col2 = st.columns([3, 2])
-    col1.dataframe(panel.sort_values("alpha_t", ascending=False), height=420)
-    with col2:
-        st.metric("Naive |t|>2 'skilled'", int((panel["alpha_t"].abs() > 2).sum()))
-        st.metric("BH-FDR survivors",
-                  int(panel["BH significant (FDR 10%)"].sum()))
-        st.caption("2 truly skilled managers seeded (mgr_03, mgr_11). "
-                   "Naive t-stat screens over-hire; FDR control is the fix.")
-        pick = st.selectbox("Style-drift monitor", list(rets))
-        rb = managers.rolling_betas(pd.Series(rets[pick], index=fac.index),
-                                    fac, window=36)
-        st.line_chart(rb, height=220)
+# =================================================================== credit
+with tabs[2]:
+    st.caption("*US credit conditions: spread levels vs history, the "
+               "IG/HY complex, and where the bond-mispricing research "
+               "lives (Research tab).*")
 
-    st.divider()
-    st.subheader("Luck vs skill — Fama-French (2010) bootstrap")
+    @st.cache_data(ttl=6 * 3600, show_spinner="Fetching credit spreads...")
+    def get_spreads():
+        try:
+            return data_live.credit_spreads(start="2000-01-01"), True
+        except Exception:
+            return None, False
 
-    @st.cache_data(show_spinner="Bootstrapping the zero-alpha null...")
-    def run_boot(rets_key: int):
-        R = pd.DataFrame(rets, index=fac.index)
-        return managers.bootstrap_skill_test(R, fac, n_boot=500, seed=7)
+    cs, cs_live = get_spreads()
+    if cs is None:
+        st.warning("Credit spread data unavailable (FRED unreachable).")
+    else:
+        live_badge(cs_live, "ICE BofA US IG / HY option-adjusted spreads")
+        ig, hy = cs["IG_OAS_bp"].dropna(), cs["HY_OAS_bp"].dropna()
+        m = st.columns(4)
+        m[0].metric("IG OAS", f"{ig.iloc[-1]:.0f} bp",
+                    delta=f"{ig.iloc[-1] - ig.iloc[-22]:+.0f} bp / 1m",
+                    delta_color="inverse")
+        m[1].metric("HY OAS", f"{hy.iloc[-1]:.0f} bp",
+                    delta=f"{hy.iloc[-1] - hy.iloc[-22]:+.0f} bp / 1m",
+                    delta_color="inverse")
+        m[2].metric("IG percentile (sample)",
+                    f"{(ig <= ig.iloc[-1]).mean():.0%}",
+                    help="share of history with tighter spreads than today")
+        m[3].metric("HY / IG ratio", f"{hy.iloc[-1] / ig.iloc[-1]:.1f}x",
+                    help="compression below ~3x = late-cycle reach for yield")
+        st.line_chart(cs, height=300)
+        st.caption("Free FRED history is ~3y without an API key — set "
+                   "FRED_API_KEY for the full series back to 1996/2000. "
+                   "Levels vs history answer 'am I paid for credit risk "
+                   "today?'; the cross-sectional version of that question "
+                   "— WHICH bonds are mis-priced given fundamentals — is "
+                   "the Research tab.")
 
-    boot = run_boot(0)
-    b1, b2 = st.columns([3, 2])
-    with b1:
-        ranks = np.arange(1, len(boot["actual_sorted_t"]) + 1)
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.fill_between(ranks, boot["null_5"], boot["null_95"], alpha=0.2,
-                        color="grey", label="luck alone (5-95% band)")
-        ax.plot(ranks, boot["null_50"], "--", color="grey",
-                label="luck median")
-        ax.plot(ranks, boot["actual_sorted_t"], "o-", color="#EE6677",
-                label="actual panel")
-        ax.set_xlabel("manager rank (worst → best alpha t-stat)")
-        ax.set_ylabel("alpha t-stat"); ax.legend(); ax.grid(alpha=0.3)
+        st.subheader("Credit stress regimes")
+        dlt = ig.diff().dropna()
+        featc = np.column_stack([ig.reindex(dlt.index).to_numpy(),
+                                 dlt.rolling(10).std().bfill().to_numpy()])
+        jmc = JumpModel(jump_penalty=40.0).fit(featc)
+        fig, ax = plt.subplots(figsize=(11, 3.4))
+        ax.plot(dlt.index, ig.reindex(dlt.index), "k", lw=0.9)
+        ax.fill_between(dlt.index, ig.min(), ig.max(),
+                        where=jmc.states == 1, alpha=0.25, color="red",
+                        label="stress regime")
+        ax.set_ylabel("IG OAS (bp)"); ax.legend()
+        ax.set_title("Jump-model regimes on IG spreads (level + vol)")
         st.pyplot(fig, clear_figure=True)
-    with b2:
-        st.metric("P(luck beats best manager)", f"{boot['p_top']:.1%}")
-        st.caption("Every manager is re-simulated with alpha forced to "
-                   "ZERO (factor exposure + resampled residuals); the "
-                   "grey band is what a panel of skill-less managers "
-                   "produces from luck across this many trials. Actual "
-                   "t-stats above the band at the top ranks = skill the "
-                   "null can't explain — the cross-sectional complement "
-                   "to the per-manager BH-FDR screen above.")
+        st.caption("Same regime machinery as the Macro tab, and the same "
+                   "definition under which the research finds the IG "
+                   "mispricing premium concentrates in stress months "
+                   "(slope 0.57, t=3.7 vs 0.04 calm — Research tab).")
+
+
+# ============================================ research (cont.): signal lab
+with tabs[5]:
+    st.divider()
+    st.subheader("Signal lab — the same discipline, applied to strategies")
+    eqs, eqs_live = get_equity()
+    live_badge(eqs_live, "S&P 500 (signal test-bed)")
+    prices_s = eqs["SP500"].dropna()
+    ret_s = prices_s.pct_change().dropna()
+    prices_s = prices_s.loc[ret_s.index]
+
+    st.write("**Gate 1 — selection: purged CV + deflated Sharpe**")
+
+    def make_position(inputs, lookback, skip):
+        sig = taa.momentum(inputs["prices"], lookback=lookback, skip=skip)
+        return taa.zscore_position(sig).fillna(0.0)
+
+    grid = [{"lookback": lb, "skip": sk}
+            for lb in (63, 126, 252) for sk in (5, 21)]
+    cv = taa.PurgedKFold(n_splits=5, label_horizon=21, embargo_pct=0.02)
+    with st.spinner("Running purged CV..."):
+        res, sel = taa.cv_sharpes(make_position, grid, {"prices": prices_s},
+                                  ret_s, cv)
+    col1, col2 = st.columns(2)
+    col1.dataframe(res.sort_values("test_sharpe_mean", ascending=False))
+    with col2:
+        st.dataframe(sel)
+        st.metric("OOS Sharpe of selection",
+                  f"{sel['oos_sharpe'].mean():.2f}")
+    best = res.sort_values("test_sharpe_mean", ascending=False).iloc[0]
+    pos = make_position({"prices": prices_s}, int(best["lookback"]),
+                        int(best["skip"]))
+    net = taa.backtest(pos, ret_s)["net"]
+    grid_srs = np.array([taa.sharpe(taa.backtest(
+        make_position({"prices": prices_s}, g["lookback"], g["skip"]),
+        ret_s)["net"]) for g in grid]) / np.sqrt(taa.ANN)
+    dsr = taa.deflated_sharpe(net, n_trials=len(grid),
+                              trial_sr_var=float(grid_srs.var()))
+    m = st.columns(3)
+    m[0].metric("Best net Sharpe", f"{taa.sharpe(net):.2f}")
+    m[1].metric("Probabilistic Sharpe",
+                f"{taa.probabilistic_sharpe(net):.0%}")
+    m[2].metric(f"Deflated Sharpe ({len(grid)} trials)", f"{dsr:.0%}")
+    st.info("Verdict: " + ("✅ survives multiple-testing correction"
+                           if dsr > 0.95 else
+                           "⚠️ NOT proven — likely selection bias; do not "
+                           "deploy on this evidence"))
+
+    st.write("**Gate 2 — a 12-signal battery vs multiple testing "
+             "(BH-FDR + Fama-French bootstrap)**")
+
+    @st.cache_data(show_spinner="Backtesting 12 signals + bootstrapping "
+                                "the zero-alpha null...")
+    def signal_battery(n_key: int):
+        from scipy.stats import norm as _norm
+        sig_rets = {}
+        for lb in (21, 63, 126, 252):
+            for sk in (1, 5, 21):
+                p_ = taa.zscore_position(taa.momentum(
+                    prices_s, lookback=lb, skip=sk)).fillna(0.0)
+                sig_rets[f"mom_{lb}_{sk}"] = taa.backtest(p_, ret_s)["net"]
+        R = pd.DataFrame(sig_rets).dropna()
+        t_ = R.mean() / R.std() * np.sqrt(len(R))
+        pv = pd.Series(2 * (1 - _norm.cdf(t_.abs())), index=R.columns)
+        bh_ = managers.benjamini_hochberg(pv, fdr=0.10)
+        boot_ = managers.bootstrap_skill_test(
+            R, pd.DataFrame({"asset": ret_s.reindex(R.index)}), n_boot=300)
+        return R, t_, bh_, boot_
+
+    R, t_stats, bh, boot = signal_battery(len(prices_s))
+    tbl = pd.DataFrame({
+        "ann_ret_%": (R.mean() * 252 * 100).round(2),
+        "sharpe": (R.mean() / R.std() * np.sqrt(252)).round(2),
+        "t_stat": t_stats.round(2),
+        "BH significant": bh["significant_at_FDR"]})
+    c1, c2 = st.columns([3, 2])
+    c1.dataframe(tbl.sort_values("t_stat", ascending=False), height=380)
+    with c2:
+        st.metric("Naive |t|>2", int((t_stats.abs() > 2).sum()))
+        st.metric("BH-FDR survivors (10%)",
+                  int(bh["significant_at_FDR"].sum()))
+        st.metric("P(luck beats best signal)", f"{boot['p_top']:.0%}")
+        st.caption("The luck-vs-skill machinery originally built for "
+                   "manager panels, repointed at a strategy battery: "
+                   "each signal is re-simulated with its timing alpha "
+                   "forced to zero, and the best REAL signal is compared "
+                   "with the best LUCKY one. If nothing survives, that "
+                   "is the finding — identical logic to the deflated "
+                   "Sharpe on the bond-mispricing strategy above.")
+
+    st.write("**Gate 3 — post-deployment decay monitor**")
+    rep = monitoring.decay_report(net.dropna(), window=252)
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Full-sample IR", f"{rep['full_ir']:.2f}")
+    g2.metric("Recent IR (1y)", f"{rep['recent_ir']:.2f}")
+    g3.metric("IR trend /yr", f"{rep['ir_trend_per_year']:+.2f}")
+    g4.metric("Verdict", rep["verdict"])
+    ir_series = monitoring.rolling_ir(net.dropna(), window=252).dropna()
+    if len(ir_series):
+        st.line_chart(ir_series, height=220)
+    st.caption("Selection gate at inception (deflated Sharpe), battery "
+               "gate across candidates (FDR/bootstrap), decay gate in "
+               "production (rolling IR) — the full signal-governance "
+               "lifecycle.")

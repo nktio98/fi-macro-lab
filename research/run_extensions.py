@@ -8,8 +8,8 @@ import argparse
 import json
 
 from .artifacts import ARTIFACT_DIR
-from .extensions import decay_profile, liquidity_double_sort, \
-    regime_conditional_fmb, strategy_turnover
+from .extensions import decay_profile, downgrade_mechanism, \
+    liquidity_double_sort, regime_conditional_fmb, strategy_turnover
 from .panel import build_panel
 from .signals import spread_residuals
 
@@ -40,13 +40,22 @@ def main():
     print(f"   turnover={turn['one_way_turnover']:.2f}, "
           f"breakeven={turn['breakeven_cost_bp']:.1f}bp one-way")
 
-    print("3/3 regime-conditional FMB...")
+    print("3/4 regime-conditional FMB...")
     reg = regime_conditional_fmb(p)
     reg["table"].round(6).to_csv(out / "regime_conditional.csv")
     reg["regime"].to_csv(out / "regime_series.csv")
     print(reg["table"].round(4).to_string())
     print(f"   stress share={reg['stress_share']:.1%}, "
           f"diff t (stress-calm)={reg['diff_t_stress_minus_calm']:.2f}")
+
+    print("4/4 downgrade mechanism...")
+    dg = downgrade_mechanism(p)
+    dg["info"].round(6).to_csv(out / "downgrade_info.csv")
+    dg["return_decomp"].round(6).to_csv(out / "downgrade_decomp.csv")
+    print(dg["info"].round(4).to_string())
+    print(dg["return_decomp"].round(4).to_string())
+    print(f"   share downgraded next month: "
+          f"{dg['share_downgraded_next_month']:.2%}")
     print(f"artifacts -> {out}")
 
 
